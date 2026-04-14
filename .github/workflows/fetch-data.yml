@@ -29,7 +29,7 @@ jobs:
           const MAX_USD = 1000;
           const MIN_FX = 0.4;
           const MAX_FX = 1.0;
-          const RATE_LIMIT_PATTERN = /premium endpoint|free API requests|25 requests per day|1 request per second|spreading out/i;
+          const RATE_LIMIT_PATTERN = /rate limit|premium|free API requests|requests per day|requests per second|spreading out|thank you for using alpha vantage/i;
 
           function getJson(url) {
             return new Promise((resolve, reject) => {
@@ -47,7 +47,8 @@ jobs:
                     if (note || apiError) {
                       const details = `${apiError || note}${apiError && note ? ` | Note: ${note}` : ''}`;
                       const err = new Error(`API limit or error: ${details}`);
-                      if (RATE_LIMIT_PATTERN.test(`${note || ''} ${apiError || ''}`)) {
+                      const apiText = [note, apiError].filter(Boolean).join(' ');
+                      if (RATE_LIMIT_PATTERN.test(apiText)) {
                         err.code = 'ALPHA_VANTAGE_RATE_LIMIT';
                       }
                       throw err;
