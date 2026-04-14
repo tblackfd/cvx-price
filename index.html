@@ -1,97 +1,1211 @@
-name: Fetch CVX Data
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chevron (CVX) — Price in AUD</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-on:
-  schedule:
-    - cron: '0 * * * *'   # every hour
-  workflow_dispatch:        # allow manual trigger from GitHub UI
+    :root {
+      --bg:           #0d1117;
+      --surface:      #161b22;
+      --surface-2:    #21262d;
+      --border:       #30363d;
+      --accent:       #00c2ff;
+      --accent-dim:   rgba(0, 194, 255, 0.12);
+      --positive:     #3fb950;
+      --negative:     #f85149;
+      --text-primary: #e6edf3;
+      --text-muted:   #8b949e;
+      --chevron-blue: #0073c8;
+      --font:         'Inter', 'Segoe UI', system-ui, sans-serif;
+      --radius:       10px;
+      --transition:   200ms ease;
+    }
 
-jobs:
-  fetch:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    html { font-size: 16px; }
 
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    body {
+      background: var(--bg);
+      color: var(--text-primary);
+      font-family: var(--font);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
 
-      - name: Fetch CVX + AUD/USD data
-        env:
-          FINNHUB_KEY: ${{ secrets.FINNHUB_KEY }}
-        run: |
-          node - <<'EOF'
-          const https = require('https');
-          const fs    = require('fs');
+    /* ── Top navigation bar ───────────────────────────────────────── */
+    .navbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 2rem;
+      height: 60px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
 
-          function get(url) {
-            return new Promise((resolve, reject) => {
-              https.get(url, res => {
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                  try { resolve(JSON.parse(data)); }
-                  catch(e) { reject(new Error('JSON parse error: ' + data.slice(0, 200))); }
-                });
-              }).on('error', reject);
-            });
-          }
+    .navbar__brand {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      text-decoration: none;
+      color: var(--text-primary);
+    }
 
-          async function main() {
-            const key  = process.env.FINNHUB_KEY;
-            const now  = Math.floor(Date.now() / 1000);
-            const from = now - 10 * 365 * 24 * 60 * 60; // 10 years
+    .brand-icon {
+      width: 32px;
+      height: 32px;
+      background: var(--chevron-blue);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
 
-            // --- CVX stock candles from Finnhub ---
-            console.log('Fetching CVX candles...');
-            const stock = await get(
-              `https://finnhub.io/api/v1/stock/candle?symbol=CVX&resolution=D&from=${from}&to=${now}&token=${key}`
-            );
-            if (stock.s !== 'ok') throw new Error('Finnhub error: ' + stock.s);
-            console.log(`Got ${stock.t.length} candles`);
+    /* Chevron "V" shape using CSS clip */
+    .brand-icon svg { width: 20px; height: 20px; }
 
-            // --- AUD/USD history from Frankfurter ---
-            console.log('Fetching AUD/USD rates...');
-            const today = new Date().toISOString().slice(0, 10);
-            const fx = await get(
-              `https://api.frankfurter.dev/v1/1999-01-04..${today}?from=USD&to=AUD`
-            );
-            if (!fx.rates) throw new Error('Frankfurter error: no rates');
-            console.log(`Got ${Object.keys(fx.rates).length} FX dates`);
+    .brand-name {
+      font-weight: 700;
+      font-size: 1.05rem;
+      letter-spacing: -0.01em;
+    }
 
-            // --- Build merged data array ---
-            const fxDates = Object.keys(fx.rates).sort();
+    .brand-ticker {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-weight: 600;
+    }
 
-            function nearestFX(isoDate) {
-              if (fx.rates[isoDate]) return fx.rates[isoDate].AUD;
-              const prev = fxDates.filter(d => d <= isoDate);
-              return prev.length ? fx.rates[prev[prev.length - 1]].AUD : null;
-            }
+    .navbar__meta {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+    }
 
-            const merged = stock.t.map((ts, i) => {
-              const date    = new Date(ts * 1000).toISOString().slice(0, 10);
-              const usd     = stock.c[i];
-              const audPerUsd = nearestFX(date);
-              const aud     = audPerUsd ? usd * audPerUsd : null;
-              const fx_rate = audPerUsd ? 1 / audPerUsd : null;
-              return { date, usd, aud, fx: fx_rate };
-            }).filter(d => d.aud !== null && d.usd !== null);
+    /* ── Hero price strip ─────────────────────────────────────────── */
+    .hero {
+      padding: 2rem 2rem 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      gap: 1.5rem;
+    }
 
-            const output = {
-              updated: new Date().toISOString(),
-              data: merged,
-            };
+    .hero__price-block {}
 
-            fs.writeFileSync('data.json', JSON.stringify(output));
-            console.log(`Wrote ${merged.length} rows to data.json`);
-          }
+    .hero__label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-muted);
+      margin-bottom: 0.25rem;
+    }
 
-          main().catch(e => { console.error(e); process.exit(1); });
-          EOF
+    .hero__price {
+      font-size: 2.8rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1;
+    }
 
-      - name: Commit data.json
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data.json
-          git diff --staged --quiet || git commit -m "chore: update CVX data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push
+    .hero__currency {
+      font-size: 1.2rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      margin-right: 0.2rem;
+      vertical-align: super;
+      font-size: 1rem;
+    }
+
+    .hero__change {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin-top: 0.4rem;
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    .hero__change.positive { color: var(--positive); }
+    .hero__change.negative { color: var(--negative); }
+
+    .hero__change-arrow { font-size: 1rem; }
+
+    /* USD reference & FX pill */
+    .hero__sub {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.3rem 0.7rem;
+      border-radius: 20px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    .pill--accent {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .pill__dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    /* ── Range selector ───────────────────────────────────────────── */
+    .controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      padding: 1.5rem 2rem 0.5rem;
+    }
+
+    .range-tabs {
+      display: flex;
+      gap: 0.25rem;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 3px;
+    }
+
+    .range-tab {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-family: var(--font);
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 0.3rem 0.75rem;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+
+    .range-tab:hover { color: var(--text-primary); background: var(--border); }
+
+    .range-tab.active {
+      background: var(--accent);
+      color: #000;
+    }
+
+    .chart-options {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .option-btn {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-family: var(--font);
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 0.3rem 0.75rem;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+
+    .option-btn:hover { color: var(--text-primary); border-color: var(--text-muted); }
+    .option-btn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+
+    /* ── Date range bar ──────────────────────────────────────────── */
+    .date-range-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0 2rem 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    .date-label {
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .date-input {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--text-primary);
+      font-family: var(--font);
+      font-size: 0.8rem;
+      padding: 0.28rem 0.65rem;
+      outline: none;
+      cursor: pointer;
+      color-scheme: dark;
+      transition: border-color var(--transition);
+    }
+    .date-input:focus { border-color: var(--accent); }
+
+    .apply-btn {
+      background: var(--accent);
+      border: none;
+      border-radius: 7px;
+      color: #000;
+      font-family: var(--font);
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 0.32rem 0.9rem;
+      cursor: pointer;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity var(--transition);
+    }
+    .apply-btn.visible { opacity: 1; pointer-events: auto; }
+
+    /* ── Main chart container ─────────────────────────────────────── */
+    .chart-wrapper {
+      position: relative;
+      margin: 0.5rem 2rem 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      flex: 1;
+    }
+
+    /* Loading overlay */
+    .loading-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      background: var(--surface);
+      z-index: 10;
+    }
+
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .loading-text {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    /* Error state */
+    .error-state {
+      display: none;
+      position: absolute;
+      inset: 0;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.75rem;
+      background: var(--surface);
+      z-index: 10;
+    }
+
+    .error-icon { font-size: 2rem; }
+
+    .error-title {
+      font-weight: 600;
+      color: var(--negative);
+    }
+
+    .error-msg { font-size: 0.85rem; color: var(--text-muted); text-align: center; max-width: 340px; }
+
+    .retry-btn {
+      margin-top: 0.5rem;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+      font-family: var(--font);
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 0.5rem 1.25rem;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: border-color var(--transition);
+    }
+
+    .retry-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Tooltip */
+    .chart-tooltip {
+      position: absolute;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.6rem 0.9rem;
+      font-size: 0.8rem;
+      pointer-events: none;
+      z-index: 20;
+      display: none;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+      min-width: 160px;
+    }
+
+    .tooltip-date { color: var(--text-muted); margin-bottom: 0.3rem; font-weight: 500; }
+    .tooltip-row { display: flex; justify-content: space-between; gap: 1rem; margin-top: 0.15rem; }
+    .tooltip-label { color: var(--text-muted); }
+    .tooltip-value { font-weight: 700; }
+    .tooltip-value.aud { color: var(--accent); }
+    .tooltip-value.usd { color: var(--text-primary); }
+    .tooltip-value.fx  { color: #a5d6a7; }
+
+    /* The actual canvas */
+    #mainChart {
+      display: block;
+      width: 100%;
+      height: 400px;
+    }
+
+    /* ── Stats row ────────────────────────────────────────────────── */
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin: 1rem 2rem 0;
+      overflow: hidden;
+    }
+
+    .stat-card {
+      background: var(--surface);
+      padding: 1rem 1.25rem;
+    }
+
+    .stat-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      font-weight: 600;
+      margin-bottom: 0.35rem;
+    }
+
+    .stat-value {
+      font-size: 1.05rem;
+      font-weight: 700;
+    }
+
+    .stat-sub {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.1rem;
+    }
+
+    /* ── FX sub-chart ─────────────────────────────────────────────── */
+    .fx-section {
+      margin: 1rem 2rem 0;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .section-title {
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--text-muted);
+    }
+
+    .section-line {
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .fx-chart-wrapper {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    #fxChart {
+      display: block;
+      width: 100%;
+      height: 120px;
+    }
+
+    /* ── Footer ───────────────────────────────────────────────────── */
+    footer {
+      margin: 1.5rem 2rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+    }
+
+    footer a { color: var(--text-muted); text-decoration: none; }
+    footer a:hover { color: var(--text-primary); }
+
+    /* ── API key button (navbar) ──────────────────────────────────── */
+    .key-btn {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-family: var(--font);
+      font-size: 0.78rem;
+      font-weight: 600;
+      padding: 0.3rem 0.75rem;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+    .key-btn:hover { color: var(--text-primary); border-color: var(--text-muted); }
+    .key-btn.configured { border-color: var(--positive); color: var(--positive); }
+
+    /* ── API key setup overlay ────────────────────────────────────── */
+    .setup-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(13,17,23,0.92);
+      backdrop-filter: blur(6px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+      padding: 1rem;
+    }
+
+    .setup-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 2.5rem 2rem;
+      max-width: 440px;
+      width: 100%;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+    }
+
+    .setup-card__icon {
+      width: 48px;
+      height: 48px;
+      background: var(--accent-dim);
+      border: 1px solid var(--accent);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .setup-card h2 {
+      font-size: 1.2rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+    }
+
+    .setup-card p {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+      margin-bottom: 1.25rem;
+    }
+
+    .setup-card a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 600;
+    }
+    .setup-card a:hover { text-decoration: underline; }
+
+    .setup-input-row {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 1.25rem;
+    }
+
+    .setup-input {
+      flex: 1;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-primary);
+      font-family: var(--font);
+      font-size: 0.875rem;
+      padding: 0.55rem 0.85rem;
+      outline: none;
+      transition: border-color var(--transition);
+    }
+    .setup-input:focus { border-color: var(--accent); }
+    .setup-input::placeholder { color: var(--text-muted); }
+
+    .setup-submit {
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      color: #000;
+      font-family: var(--font);
+      font-size: 0.875rem;
+      font-weight: 700;
+      padding: 0.55rem 1.25rem;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: opacity var(--transition);
+    }
+    .setup-submit:hover { opacity: 0.85; }
+
+    .setup-note {
+      margin-top: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    /* ── Responsive ───────────────────────────────────────────────── */
+    @media (max-width: 640px) {
+      .navbar { padding: 0 1rem; }
+      .hero, .controls, .date-range-bar, .chart-wrapper, .stats-row, .fx-section, footer {
+        margin-left: 1rem;
+        margin-right: 1rem;
+        padding-left: 0;
+        padding-right: 0;
+      }
+      .hero { padding: 1.25rem 1rem 0; }
+      .controls { padding: 1rem 1rem 0.5rem; }
+      .hero__price { font-size: 2rem; }
+      #mainChart { height: 280px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── Navbar ──────────────────────────────────────────────────── -->
+  <nav class="navbar">
+    <a class="navbar__brand" href="#">
+      <div class="brand-icon">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <polyline points="3,6 10,13 17,6" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <span class="brand-name">Chevron</span>
+      <span class="brand-ticker">CVX</span>
+    </a>
+    <span class="navbar__meta" id="lastUpdated">Loading…</span>
+  </nav>
+
+  <!-- ── Hero ───────────────────────────────────────────────────── -->
+  <div class="hero">
+    <div class="hero__price-block">
+      <div class="hero__label">Latest Price in AUD</div>
+      <div class="hero__price">
+        <span class="hero__currency">A$</span><span id="heroPrice">—</span>
+      </div>
+      <div class="hero__change" id="heroChange">
+        <span class="hero__change-arrow" id="heroArrow"></span>
+        <span id="heroChangeVal">—</span>
+        <span id="heroPct">—</span>
+      </div>
+    </div>
+
+    <div class="hero__sub">
+      <span class="pill">
+        <span class="pill__dot"></span>
+        USD <span id="heroUSD">—</span>
+      </span>
+      <span class="pill pill--accent">
+        <span class="pill__dot"></span>
+        AUD/USD <span id="heroFX">—</span>
+      </span>
+    </div>
+  </div>
+
+  <!-- ── Controls ───────────────────────────────────────────────── -->
+  <div class="controls">
+    <div class="range-tabs" role="group" aria-label="Time range">
+      <button class="range-tab" data-range="1M">1M</button>
+      <button class="range-tab" data-range="3M">3M</button>
+      <button class="range-tab active" data-range="6M">6M</button>
+      <button class="range-tab" data-range="1Y">1Y</button>
+      <button class="range-tab" data-range="2Y">2Y</button>
+      <button class="range-tab" data-range="5Y">5Y</button>
+      <button class="range-tab" data-range="MAX">MAX</button>
+    </div>
+
+    <div class="chart-options">
+      <button class="option-btn active" data-view="aud">AUD</button>
+      <button class="option-btn" data-view="usd">USD</button>
+      <button class="option-btn" data-view="both">Both</button>
+    </div>
+  </div>
+
+  <!-- ── Date range bar ─────────────────────────────────────────── -->
+  <div class="date-range-bar">
+    <span class="date-label">From</span>
+    <input type="date" class="date-input" id="startDate" />
+    <span class="date-label">To</span>
+    <input type="date" class="date-input" id="endDate" />
+    <button class="apply-btn" id="applyRange">Apply</button>
+  </div>
+
+  <!-- ── Main chart ──────────────────────────────────────────────── -->
+  <div class="chart-wrapper" id="chartWrapper">
+    <div class="loading-overlay" id="loadingOverlay">
+      <div class="spinner"></div>
+      <div class="loading-text">Fetching price &amp; FX data…</div>
+    </div>
+    <div class="error-state" id="errorState">
+      <div class="error-icon">⚠️</div>
+      <div class="error-title">Unable to load data</div>
+      <div class="error-msg" id="errorMsg">Could not retrieve Chevron or exchange rate data. Please try again.</div>
+      <button class="retry-btn" id="retryBtn">Retry</button>
+    </div>
+    <div class="chart-tooltip" id="chartTooltip">
+      <div class="tooltip-date" id="ttDate"></div>
+      <div class="tooltip-row">
+        <span class="tooltip-label">AUD</span>
+        <span class="tooltip-value aud" id="ttAud"></span>
+      </div>
+      <div class="tooltip-row">
+        <span class="tooltip-label">USD</span>
+        <span class="tooltip-value usd" id="ttUsd"></span>
+      </div>
+      <div class="tooltip-row">
+        <span class="tooltip-label">AUD/USD</span>
+        <span class="tooltip-value fx" id="ttFx"></span>
+      </div>
+    </div>
+    <canvas id="mainChart"></canvas>
+  </div>
+
+  <!-- ── Stats ───────────────────────────────────────────────────── -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">Period High (AUD)</div>
+      <div class="stat-value" id="statHigh">—</div>
+      <div class="stat-sub" id="statHighDate"></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Period Low (AUD)</div>
+      <div class="stat-value" id="statLow">—</div>
+      <div class="stat-sub" id="statLowDate"></div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Period Return (AUD)</div>
+      <div class="stat-value" id="statReturn">—</div>
+      <div class="stat-sub">vs period open</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Avg FX Rate</div>
+      <div class="stat-value" id="statFx">—</div>
+      <div class="stat-sub">AUD/USD average</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">FX Impact</div>
+      <div class="stat-value" id="statFxImpact">—</div>
+      <div class="stat-sub">AUD vs USD return</div>
+    </div>
+  </div>
+
+  <!-- ── FX sub-chart ─────────────────────────────────────────────── -->
+  <div class="fx-section">
+    <div class="section-header">
+      <span class="section-title">AUD / USD Exchange Rate</span>
+      <div class="section-line"></div>
+    </div>
+    <div class="fx-chart-wrapper">
+      <canvas id="fxChart"></canvas>
+    </div>
+  </div>
+
+  <!-- ── Footer ─────────────────────────────────────────────────── -->
+  <footer>
+    <span>Data: Finnhub.io (CVX prices) &amp; Frankfurter.dev (AUD/USD daily history), fetched hourly via GitHub Actions. Prices converted using contemporaneous daily rates.</span>
+    <span>Not financial advice. For informational purposes only.</span>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+
+  <script>
+  'use strict';
+
+  // ── Helpers ───────────────────────────────────────────────────────
+  const el = id => document.getElementById(id);
+
+  const fmtAUD = n => n == null ? '—' : `A$${n.toFixed(2)}`;
+  const fmtUSD = n => n == null ? '—' : `$${n.toFixed(2)}`;
+  const fmtPct = n => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+  const fmtDate = d => d.toLocaleDateString('en-AU', {
+    day: 'numeric', month: 'short', year: 'numeric'
+  });
+
+  function toISO(d) {
+    // YYYY-MM-DD in local time
+    return d.toLocaleDateString('en-CA'); // en-CA gives YYYY-MM-DD
+  }
+
+  // ── State ─────────────────────────────────────────────────────────
+  let currentView = 'aud';
+  let allData     = [];
+  let mainChart   = null;
+  let fxChart     = null;
+
+  // Active date window — driven by preset tabs, MAX, or custom date inputs
+  let rangeStart = new Date(Date.now() - 180 * 86_400_000); // default: 6M ago
+  let rangeEnd   = new Date();
+
+  // Days offset for each preset tab
+  const PRESET_DAYS = { '1M': 30, '3M': 90, '6M': 180, '1Y': 365, '2Y': 730, '5Y': 1825 };
+
+  function syncDateInputs() {
+    el('startDate').value = toISO(rangeStart);
+    el('endDate').value   = toISO(rangeEnd);
+  }
+
+  // Both datasets fetched once per session and filtered client-side —
+  // switching range tabs never triggers another network request.
+  // ── All data is pre-fetched server-side by a GitHub Action and stored
+  // in data.json. The browser just reads that file — no external API calls,
+  // no CORS issues, no API keys exposed.
+  //
+  // data.json shape: { updated: ISO string, data: [{ date, usd, aud, fx }] }
+
+  let cachedRows = null; // full dataset from data.json
+
+  async function loadAllData(forceRefresh = false) {
+    if (cachedRows && !forceRefresh) return { rows: cachedRows, updated: null };
+    const cacheBuster = forceRefresh ? `?t=${Date.now()}` : '';
+    const r = await fetch(`data.json${cacheBuster}`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(15_000)
+    });
+    if (!r.ok) throw new Error(`Could not load data.json: HTTP ${r.status}`);
+    const json = await r.json();
+    if (!json.data || json.data.length === 0) throw new Error('data.json is empty — please trigger the GitHub Action to populate it.');
+    cachedRows = json.data.map(d => ({
+      date: new Date(d.date),
+      usd:  d.usd,
+      aud:  d.aud,
+      fx:   d.fx,
+    }));
+    return { rows: cachedRows, updated: json.updated };
+  }
+
+  // ── Main load ─────────────────────────────────────────────────────
+  async function loadData(forceRefresh = false) {
+    showLoading(true);
+    showError(false);
+
+    try {
+      const { rows, updated } = await loadAllData(forceRefresh);
+
+      allData = rows.filter(d => d.date >= rangeStart && d.date <= rangeEnd);
+      allData.sort((a, b) => a.date - b.date);
+      if (allData.length === 0) throw new Error('No data found for selected range.');
+
+      renderHero();
+      renderStats();
+      renderMainChart();
+      renderFXChart();
+      const updatedDate = updated ? fmtDate(new Date(updated)) : fmtDate(new Date());
+      el('lastUpdated').textContent = `Updated ${updatedDate}`;
+
+    } catch (err) {
+      console.error(err);
+      el('errorMsg').textContent = err.message || 'Unexpected error — please retry.';
+      showError(true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  // ── Hero strip ────────────────────────────────────────────────────
+  function renderHero() {
+    const first = allData[0];
+    const last  = allData[allData.length - 1];
+
+    el('heroPrice').textContent = last.aud.toFixed(2);
+    el('heroUSD').textContent   = `$${last.usd.toFixed(2)}`;
+    el('heroFX').textContent    = last.fx.toFixed(4);
+
+    const change = last.aud - first.aud;
+    const pct    = (change / first.aud) * 100;
+    const pos    = change >= 0;
+
+    el('heroChange').className    = `hero__change ${pos ? 'positive' : 'negative'}`;
+    el('heroArrow').textContent   = pos ? '▲' : '▼';
+    el('heroChangeVal').textContent = `${pos ? '+' : ''}A$${change.toFixed(2)}`;
+    el('heroPct').textContent     = `(${fmtPct(pct)})`;
+  }
+
+  // ── Stats cards ───────────────────────────────────────────────────
+  function renderStats() {
+    const auds = allData.map(d => d.aud);
+    const usds = allData.map(d => d.usd);
+    const fxs  = allData.map(d => d.fx);
+
+    const highVal = Math.max(...auds);
+    const lowVal  = Math.min(...auds);
+    const highIdx = auds.indexOf(highVal);
+    const lowIdx  = auds.indexOf(lowVal);
+
+    el('statHigh').textContent     = fmtAUD(highVal);
+    el('statHighDate').textContent = fmtDate(allData[highIdx].date);
+    el('statLow').textContent      = fmtAUD(lowVal);
+    el('statLowDate').textContent  = fmtDate(allData[lowIdx].date);
+
+    const audRet = ((auds.at(-1) - auds[0]) / auds[0]) * 100;
+    const usdRet = ((usds.at(-1) - usds[0]) / usds[0]) * 100;
+    const fxImpact = audRet - usdRet;
+    const avgFx  = fxs.reduce((a, b) => a + b, 0) / fxs.length;
+
+    const retEl = el('statReturn');
+    retEl.textContent  = fmtPct(audRet);
+    retEl.style.color  = audRet >= 0 ? 'var(--positive)' : 'var(--negative)';
+
+    el('statFx').textContent = avgFx.toFixed(4);
+
+    const impEl = el('statFxImpact');
+    impEl.textContent = `${fxImpact >= 0 ? '+' : ''}${fxImpact.toFixed(2)} pp`;
+    impEl.style.color = fxImpact >= 0 ? 'var(--positive)' : 'var(--negative)';
+  }
+
+  // ── Chart helpers ─────────────────────────────────────────────────
+  function getTimeUnit() {
+    const days = (rangeEnd - rangeStart) / 86_400_000;
+    if (days <= 90)   return 'week';
+    if (days <= 365)  return 'month';
+    if (days <= 1825) return 'quarter';
+    return 'year';
+  }
+
+  function gradient(ctx, color) {
+    const g = ctx.createLinearGradient(0, 0, 0, 400);
+    g.addColorStop(0, color + '44');
+    g.addColorStop(1, color + '00');
+    return g;
+  }
+
+  const GRID  = 'rgba(48,54,61,0.6)';
+  const MUTED = '#8b949e';
+
+  // ── Main chart ────────────────────────────────────────────────────
+  function renderMainChart() {
+    const canvas = el('mainChart');
+    const ctx    = canvas.getContext('2d');
+    if (mainChart) mainChart.destroy();
+
+    const showAUD  = currentView !== 'usd';
+    const showUSD  = currentView !== 'aud';
+    const bothAxes = showAUD && showUSD;
+
+    const datasets = [];
+
+    if (showAUD) {
+      datasets.push({
+        label: 'CVX (AUD)',
+        data: allData.map(d => d.aud),
+        borderColor: '#00c2ff',
+        backgroundColor: gradient(ctx, '#00c2ff'),
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 5,
+        fill: !bothAxes,
+        tension: 0.3,
+        yAxisID: bothAxes ? 'yAUD' : 'y',
+      });
+    }
+
+    if (showUSD) {
+      datasets.push({
+        label: 'CVX (USD)',
+        data: allData.map(d => d.usd),
+        borderColor: '#f0a030',
+        backgroundColor: gradient(ctx, '#f0a030'),
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 5,
+        fill: !bothAxes,
+        tension: 0.3,
+        yAxisID: bothAxes ? 'yUSD' : 'y',
+      });
+    }
+
+    const xScale = {
+      type: 'time',
+      time: { unit: getTimeUnit() },
+      grid:   { color: GRID },
+      ticks:  { color: MUTED, maxTicksLimit: 8 },
+      border: { color: '#30363d' },
+    };
+
+    let scales = { x: xScale };
+
+    if (bothAxes) {
+      scales.yAUD = {
+        type: 'linear', position: 'left',
+        grid:   { color: GRID },
+        ticks:  { color: '#00c2ff', callback: v => `A$${v.toFixed(0)}` },
+        border: { color: '#30363d' },
+      };
+      scales.yUSD = {
+        type: 'linear', position: 'right',
+        grid:   { drawOnChartArea: false },
+        ticks:  { color: '#f0a030', callback: v => `$${v.toFixed(0)}` },
+        border: { color: '#30363d' },
+      };
+    } else {
+      const isAUD = showAUD;
+      scales.y = {
+        grid:   { color: GRID },
+        ticks:  {
+          color: isAUD ? '#00c2ff' : '#f0a030',
+          callback: v => isAUD ? `A$${v.toFixed(0)}` : `$${v.toFixed(0)}`,
+        },
+        border: { color: '#30363d' },
+      };
+    }
+
+    mainChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: allData.map(d => d.date), datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: { enabled: false },   // we use our custom tooltip
+        },
+        scales,
+        animation: { duration: 350 },
+      },
+    });
+
+    // Mouse events (desktop)
+    canvas.addEventListener('mousemove', showTooltip);
+    canvas.addEventListener('mouseleave', hideTooltip);
+
+    // Touch events (mobile) — passive:false lets us preventDefault to suppress
+    // page scrolling while the user scrubs the chart
+    canvas.addEventListener('touchstart', showTooltip, { passive: false });
+    canvas.addEventListener('touchmove',  showTooltip, { passive: false });
+    canvas.addEventListener('touchend',   hideTooltip);
+    canvas.addEventListener('touchcancel',hideTooltip);
+  }
+
+  function hideTooltip() {
+    el('chartTooltip').style.display = 'none';
+  }
+
+  function showTooltip(e) {
+    if (!mainChart) return;
+
+    const isTouch = e.touches && e.touches.length > 0;
+    if (isTouch) e.preventDefault(); // stop page scroll while scrubbing
+
+    // Pass the original event directly — Chart.js 4 handles touch events
+    // natively by reading e.touches[0].clientX internally. The synthetic
+    // MouseEvent approach breaks on iOS because constructed events have
+    // offsetX/offsetY = 0, which Chart.js reads first and uses as position 0.
+    const pts = mainChart.getElementsAtEventForMode(e, 'index', { intersect: false }, false);
+    const tt  = el('chartTooltip');
+    if (!pts.length) { hideTooltip(); return; }
+
+    const d = allData[pts[0].index];
+    el('ttDate').textContent = fmtDate(d.date);
+    el('ttAud').textContent  = fmtAUD(d.aud);
+    el('ttUsd').textContent  = fmtUSD(d.usd);
+    el('ttFx').textContent   = d.fx.toFixed(4);
+    tt.style.display = 'block';
+
+    const cx   = isTouch ? e.touches[0].clientX : e.clientX;
+    const cy   = isTouch ? e.touches[0].clientY : e.clientY;
+    const wrap = el('chartWrapper').getBoundingClientRect();
+    const ttW  = tt.offsetWidth  || 170;
+    const ttH  = tt.offsetHeight || 110;
+
+    let left = cx - wrap.left + 16;
+    // On touch, pin tooltip near the top so the finger doesn't cover it
+    let top  = isTouch ? 8 : cy - wrap.top - ttH / 2;
+    if (left + ttW > wrap.width - 8) left = cx - wrap.left - ttW - 8;
+    if (top < 8) top = 8;
+    tt.style.left = `${left}px`;
+    tt.style.top  = `${top}px`;
+  }
+
+  // ── FX sub-chart ──────────────────────────────────────────────────
+  function renderFXChart() {
+    const ctx = el('fxChart').getContext('2d');
+    if (fxChart) fxChart.destroy();
+
+    fxChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: allData.map(d => d.date),
+        datasets: [{
+          data: allData.map(d => d.fx),
+          borderColor: '#3fb950',
+          backgroundColor: 'rgba(63,185,80,0.08)',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: true,
+          tension: 0.3,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: getTimeUnit() },
+            grid:   { color: 'rgba(48,54,61,0.4)' },
+            ticks:  { color: MUTED, maxTicksLimit: 6 },
+            border: { color: '#30363d' },
+          },
+          y: {
+            position: 'right',
+            grid:   { color: 'rgba(48,54,61,0.4)' },
+            ticks:  { color: '#3fb950', callback: v => v.toFixed(3) },
+            border: { color: '#30363d' },
+          },
+        },
+        animation: { duration: 350 },
+      },
+    });
+  }
+
+  // ── UI state helpers ──────────────────────────────────────────────
+  function showLoading(on) {
+    el('loadingOverlay').style.display = on ? 'flex' : 'none';
+  }
+
+  function showError(on) {
+    el('errorState').style.display = on ? 'flex' : 'none';
+  }
+
+  // ── Re-render from cached data without re-fetching ────────────────
+  function renderFromDates() {
+    if (!cachedRows) { loadData(); return; }
+    showError(false);
+    allData = cachedRows.filter(d => d.date >= rangeStart && d.date <= rangeEnd);
+    allData.sort((a, b) => a.date - b.date);
+    if (allData.length === 0) {
+      el('errorMsg').textContent = 'No data in selected date range.';
+      showError(true);
+      return;
+    }
+    renderHero();
+    renderStats();
+    renderMainChart();
+    renderFXChart();
+  }
+
+  // ── Controls ──────────────────────────────────────────────────────
+
+  // Preset range tabs (including MAX)
+  document.querySelectorAll('.range-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.range-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      el('applyRange').classList.remove('visible');
+
+      rangeEnd = new Date();
+      const key = btn.dataset.range;
+      if (key === 'MAX') {
+        // Data goes back to 1999 (earliest Frankfurter FX data)
+        rangeStart = new Date('1999-01-04');
+      } else {
+        rangeStart = new Date(Date.now() - PRESET_DAYS[key] * 86_400_000);
+      }
+      syncDateInputs();
+      renderFromDates();
+    });
+  });
+
+  // AUD / USD / Both view toggle
+  document.querySelectorAll('.option-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.option-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentView = btn.dataset.view;
+      if (allData.length) renderMainChart();
+    });
+  });
+
+  // Custom date inputs — show Apply button when either is edited
+  ['startDate', 'endDate'].forEach(id => {
+    el(id).addEventListener('input', () => {
+      document.querySelectorAll('.range-tab').forEach(b => b.classList.remove('active'));
+      el('applyRange').classList.add('visible');
+    });
+  });
+
+  // Apply custom date range
+  el('applyRange').addEventListener('click', () => {
+    const s = new Date(el('startDate').value);
+    const e = new Date(el('endDate').value);
+    if (isNaN(s.getTime()) || isNaN(e.getTime()) || s >= e) return;
+    rangeStart = s;
+    rangeEnd   = e;
+    el('applyRange').classList.remove('visible');
+    renderFromDates();
+  });
+
+  el('retryBtn').addEventListener('click', loadData);
+
+  // ── Boot ──────────────────────────────────────────────────────────
+  syncDateInputs();
+  loadData();
+
+  // Refresh from latest data.json once per hour to reflect scheduled updates.
+  const ONE_HOUR_MS = 60 * 60 * 1000;
+  setInterval(() => {
+    loadData(true);
+  }, ONE_HOUR_MS);
+  </script>
+
+</body>
+</html>
