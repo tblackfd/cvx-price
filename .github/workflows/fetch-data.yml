@@ -24,21 +24,62 @@ jobs:
           const fs    = require('fs');
 
           const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+          const RETRY_ATTEMPTS = 2;
+          const RETRY_BASE_DELAY_MS = 1500;
 
-          function getText(url, extraHeaders = {}) {
+          function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+          }
+
+          function isRetriableHttpStatus(statusCode) {
+            return [429, 500, 502, 503, 504].includes(statusCode);
+          }
+
+          function isRetriableNetworkError(error) {
+            const message = String(error?.message || '');
+            return ['EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND']
+              .some(code => message.includes(code));
+          }
+
+          function getTextOnce(url, extraHeaders = {}) {
             return new Promise((resolve, reject) => {
               https.get(url, { headers: { 'User-Agent': UA, ...extraHeaders } }, res => {
                 if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                  return resolve(getText(res.headers.location, extraHeaders));
+                  return resolve(getTextOnce(res.headers.location, extraHeaders));
                 }
                 if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-                  return reject(new Error(`HTTP ${res.statusCode || 'unknown'} for ${url}`));
+                  const err = new Error(`HTTP ${res.statusCode || 'unknown'} for ${url}`);
+                  err.statusCode = res.statusCode || null;
+                  return reject(err);
                 }
                 let data = '';
                 res.on('data', chunk => data += chunk);
                 res.on('end', () => resolve(data));
               }).on('error', reject);
             });
+          }
+
+          // retries = number of retry attempts after the initial request.
+          // Example: retries=2 => up to 3 total attempts.
+          async function getText(url, extraHeaders = {}, retries = RETRY_ATTEMPTS) {
+            let lastError = null;
+            for (let attempt = 0; attempt <= retries; attempt++) {
+              try {
+                return await getTextOnce(url, extraHeaders);
+              } catch (e) {
+                lastError = e;
+                const statusCode = Number(e?.statusCode);
+                const shouldRetry =
+                  (Number.isFinite(statusCode) && isRetriableHttpStatus(statusCode)) ||
+                  isRetriableNetworkError(e);
+                if (!shouldRetry || attempt >= retries) break;
+                const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+                const reason = Number.isFinite(statusCode) ? `HTTP ${statusCode}` : (e?.message || 'network error');
+                console.warn(`Transient ${reason} for ${url}; retry ${attempt + 1}/${retries} in ${delayMs}ms`);
+                await sleep(delayMs);
+              }
+            }
+            throw lastError;
           }
 
           async function getJson(url) {
@@ -97,6 +138,32 @@ jobs:
               return t.length ? { t, c } : null;
             }
 
+            function getCachedCandles() {
+              try {
+                if (!fs.existsSync('data.json')) return null;
+                const parsed = JSON.parse(fs.readFileSync('data.json', 'utf8'));
+                if (!Array.isArray(parsed?.data)) return null;
+                const t = [];
+                const c = [];
+                for (const row of parsed.data) {
+                  const date = row?.date;
+                  const usd = Number(row?.usd);
+                  if (!date || !Number.isFinite(usd)) continue;
+                  const parts = String(date).split('-');
+                  if (parts.length !== 3) continue;
+                  const [y, m, d] = parts;
+                  const ts = Date.UTC(Number(y), Number(m) - 1, Number(d)) / 1000;
+                  if (!Number.isFinite(ts)) continue;
+                  t.push(ts);
+                  c.push(usd);
+                }
+                return t.length ? { t, c } : null;
+              } catch (e) {
+                console.warn(`Unable to read cached data.json (${e?.message || e})`);
+                return null;
+              }
+            }
+
             // --- CVX historical candles from Stooq → Yahoo Finance ---
             console.log('Fetching CVX historical candles...');
             let stock = null;
@@ -128,6 +195,15 @@ jobs:
                 if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance (query2)`);
               } catch (e) {
                 console.warn(`Yahoo Finance query2 failed (${e.message})`);
+              }
+            }
+
+            if (!stock) {
+              stock = getCachedCandles();
+              if (stock) {
+                console.log(`Using ${stock.t.length} cached candles from data.json`);
+              } else {
+                console.warn('No cached candles available in data.json');
               }
             }
 
