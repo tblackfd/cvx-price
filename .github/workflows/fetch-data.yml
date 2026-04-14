@@ -65,7 +65,7 @@ jobs:
                 await sleep(delayMs);
               }
             }
-            throw lastError || new Error(`Failed to fetch ${url}`);
+            throw lastError;
           }
 
           async function getJson(url) {
@@ -184,7 +184,11 @@ jobs:
 
             if (!stock) {
               stock = getCachedCandles();
-              if (stock) console.log(`Using ${stock.t.length} cached candles from data.json`);
+              if (stock) {
+                console.log(`Using ${stock.t.length} cached candles from data.json`);
+              } else {
+                console.warn('No cached candles available in data.json');
+              }
             }
 
             if (!stock) throw new Error('No source returned CVX historical candle data');
