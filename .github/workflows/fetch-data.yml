@@ -95,42 +95,49 @@ jobs:
               return t.length ? { t, c } : null;
             }
 
-            // --- CVX stock candles from Finnhub ---
-            console.log('Fetching CVX candles...');
+            // --- CVX historical candles from Stooq → Yahoo Finance ---
+            console.log('Fetching CVX historical candles...');
             let stock = null;
-            if (key) {
-              const finnhub = await getJson(
-                `https://finnhub.io/api/v1/stock/candle?symbol=CVX&resolution=D&from=${from}&to=${now}&token=${key}`
-              );
-              if (finnhub?.s === 'ok' && Array.isArray(finnhub.t) && Array.isArray(finnhub.c)) {
-                stock = finnhub;
-                console.log(`Got ${stock.t.length} candles from Finnhub`);
-              } else {
-                const reason = finnhub?.error || finnhub?.s || 'unknown error';
-                console.warn(`Finnhub failed (${reason}); using fallback sources`);
-              }
-            } else {
-              console.warn('FINNHUB_KEY is not set; using fallback sources');
-            }
 
-            if (!stock) {
-              try {
-                const csv = await getText('https://stooq.pl/q/d/l/?s=CVX.US&i=d');
-                stock = parseStooqCsv(csv);
-                if (stock) {
-                  console.log(`Got ${stock.t.length} candles from Stooq fallback`);
-                } else {
-                  console.warn('Stooq fallback returned unusable CSV; trying Yahoo Finance');
-                }
-              } catch (e) {
-                console.warn(`Stooq fallback request failed (${e.message}); trying Yahoo Finance`);
+            try {
+              const csv = await getText('https://stooq.pl/q/d/l/?s=CVX.US&i=d');
+              stock = parseStooqCsv(csv);
+              if (stock) {
+                console.log(`Got ${stock.t.length} candles from Stooq`);
+              } else {
+                console.warn('Stooq returned unusable CSV; trying Yahoo Finance');
               }
+            } catch (e) {
+              console.warn(`Stooq request failed (${e.message}); trying Yahoo Finance`);
             }
 
             if (!stock) {
               stock = await getYahooCandles();
-              if (!stock) throw new Error('No fallback source returned CVX candle data');
-              console.log(`Got ${stock.t.length} candles from Yahoo Finance fallback`);
+              if (!stock) throw new Error('No source returned CVX historical candle data');
+              console.log(`Got ${stock.t.length} candles from Yahoo Finance`);
+            }
+
+            // --- Finnhub current quote (free tier: /quote endpoint) ---
+            let finnhubQuote = null;
+            if (key) {
+              try {
+                const quote = await getJson(
+                  `https://finnhub.io/api/v1/quote?symbol=CVX&token=${key}`
+                );
+                // quote.c = current price, quote.t = timestamp (Unix seconds)
+                const price = Number(quote?.c);
+                const ts    = Number(quote?.t);
+                if (Number.isFinite(price) && price > 0 && Number.isFinite(ts) && ts > 0) {
+                  finnhubQuote = { price, ts };
+                  console.log(`Got current quote from Finnhub: $${price} at ${new Date(ts * 1000).toISOString()}`);
+                } else {
+                  console.warn('Finnhub quote response missing valid price/timestamp:', JSON.stringify(quote).slice(0, 200));
+                }
+              } catch (e) {
+                console.warn(`Finnhub quote request failed (${e.message}); skipping`);
+              }
+            } else {
+              console.warn('FINNHUB_KEY is not set; skipping Finnhub current quote');
             }
 
             // --- AUD/USD history from Frankfurter ---
@@ -159,6 +166,24 @@ jobs:
               const fx_rate = audPerUsd ? 1 / audPerUsd : null;
               return { date, usd, aud, fx: fx_rate };
             }).filter(d => d.aud !== null && d.usd !== null);
+
+            // --- Upsert Finnhub current quote as today's record ---
+            if (finnhubQuote) {
+              const quoteDate = new Date(finnhubQuote.ts * 1000).toISOString().slice(0, 10);
+              const audPerUsd = nearestFX(quoteDate);
+              const aud       = audPerUsd ? finnhubQuote.price * audPerUsd : null;
+              const fx_rate   = audPerUsd ? 1 / audPerUsd : null;
+              const record    = { date: quoteDate, usd: finnhubQuote.price, aud, fx: fx_rate, source: 'finnhub' };
+              const idx = merged.findIndex(d => d.date === quoteDate);
+              if (idx >= 0) {
+                merged[idx] = record;
+                console.log(`Updated existing record for ${quoteDate} with Finnhub quote`);
+              } else {
+                merged.push(record);
+                merged.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+                console.log(`Appended new record for ${quoteDate} from Finnhub quote`);
+              }
+            }
 
             const output = {
               updated: new Date().toISOString(),
