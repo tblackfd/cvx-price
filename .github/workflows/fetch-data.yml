@@ -47,8 +47,7 @@ jobs:
                     if (note || apiError) {
                       const details = `${apiError || note}${apiError && note ? ` | Note: ${note}` : ''}`;
                       const err = new Error(`API limit or error: ${details}`);
-                      const apiText = [note, apiError].filter(Boolean).join(' ');
-                      if (RATE_LIMIT_PATTERN.test(apiText)) {
+                      if (RATE_LIMIT_PATTERN.test(details)) {
                         err.code = 'ALPHA_VANTAGE_RATE_LIMIT';
                       }
                       throw err;
