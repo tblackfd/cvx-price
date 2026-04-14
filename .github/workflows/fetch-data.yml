@@ -124,24 +124,6 @@ jobs:
               return t.length ? { t, c } : null;
             }
 
-            async function getFinnhubCandles() {
-              if (!key) return null;
-              const candles = await getJson(
-                `https://finnhub.io/api/v1/stock/candle?symbol=CVX&resolution=D&from=${from}&to=${now}&token=${key}`
-              );
-              if (candles?.s !== 'ok' || !Array.isArray(candles?.t) || !Array.isArray(candles?.c)) return null;
-              const t = [];
-              const c = [];
-              for (let i = 0; i < candles.t.length; i++) {
-                const time = Number(candles.t[i]);
-                const closeNum = Number(candles.c[i]);
-                if (!Number.isFinite(time) || !Number.isFinite(closeNum)) continue;
-                t.push(time);
-                c.push(closeNum);
-              }
-              return t.length ? { t, c } : null;
-            }
-
             function getCachedCandles() {
               try {
                 if (!fs.existsSync('data.json')) return null;
@@ -197,15 +179,6 @@ jobs:
                 if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance (query2)`);
               } catch (e) {
                 console.warn(`Yahoo Finance query2 failed (${e.message})`);
-              }
-            }
-
-            if (!stock) {
-              try {
-                stock = await getFinnhubCandles();
-                if (stock) console.log(`Got ${stock.t.length} candles from Finnhub historical API`);
-              } catch (e) {
-                console.warn(`Finnhub historical candles failed (${e.message})`);
               }
             }
 
