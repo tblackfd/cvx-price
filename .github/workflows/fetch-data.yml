@@ -29,7 +29,7 @@ jobs:
           const MAX_USD = 1000;
           const MIN_FX = 0.4;
           const MAX_FX = 1.0;
-          const RATE_LIMIT_PATTERN = /rate limit|premium|free API requests|requests per day|requests per second|spreading out|thank you for using alpha vantage/i;
+          const RATE_LIMIT_PATTERN = /rate limit|premium|free API requests|requests per day|requests per second|spreading out/i;
 
           function getJson(url) {
             return new Promise((resolve, reject) => {
