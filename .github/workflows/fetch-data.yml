@@ -60,16 +60,36 @@ jobs:
           }
 
           async function fetchCVX() {
-            const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
-            const json = await getJson(url);
+            const mapSeries = (series) => Object.entries(series)
+              .map(([date, v]) => {
+                const adjustedClose = Number(v['5. adjusted close']);
+                const close = Number(v['4. close']);
+                return {
+                  date,
+                  usd: Number.isFinite(adjustedClose) && adjustedClose > 0 ? adjustedClose : close
+                };
+              })
+              .filter(row => Number.isFinite(row.usd) && row.usd > 0);
 
-            const series = json['Time Series (Daily)'];
-            if (!series) throw new Error('Missing CVX series');
+            const adjustedUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
+            const adjustedJson = await getJson(adjustedUrl);
+            const adjustedSeries = adjustedJson['Time Series (Daily)'];
+            if (adjustedSeries) {
+              const rows = mapSeries(adjustedSeries);
+              if (rows.length > 0) return rows;
+            }
 
-            return Object.entries(series).map(([date, v]) => ({
-              date,
-              usd: Number(v['5. adjusted close']) // better long-term metric
-            }));
+            const info = adjustedJson['Information'];
+            if (info) console.warn(`TIME_SERIES_DAILY_ADJUSTED unavailable, falling back: ${info}`);
+
+            const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
+            const dailyJson = await getJson(dailyUrl);
+            const dailySeries = dailyJson['Time Series (Daily)'];
+            if (!dailySeries) throw new Error('Missing CVX series from adjusted and daily endpoints');
+
+            const rows = mapSeries(dailySeries);
+            if (rows.length === 0) throw new Error('CVX series returned no valid price rows');
+            return rows;
           }
 
           async function fetchFX() {
@@ -77,7 +97,10 @@ jobs:
             const json = await getJson(url);
 
             const series = json['Time Series FX (Daily)'];
-            if (!series) throw new Error('Missing FX series');
+            if (!series) {
+              const info = json['Information'];
+              throw new Error(info ? `Missing FX series: ${info}` : 'Missing FX series');
+            }
 
             return Object.entries(series).map(([date, v]) => ({
               date,
