@@ -24,6 +24,7 @@ jobs:
           const fs    = require('fs');
 
           const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+          const RETRY_ATTEMPTS = 2;
           const RETRY_BASE_DELAY_MS = 1500;
 
           function sleep(ms) {
@@ -44,7 +45,7 @@ jobs:
             return new Promise((resolve, reject) => {
               https.get(url, { headers: { 'User-Agent': UA, ...extraHeaders } }, res => {
                 if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                  return resolve(getText(res.headers.location, extraHeaders));
+                  return resolve(getTextOnce(res.headers.location, extraHeaders));
                 }
                 if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
                   const err = new Error(`HTTP ${res.statusCode || 'unknown'} for ${url}`);
@@ -60,7 +61,7 @@ jobs:
 
           // retries = number of retry attempts after the initial request.
           // Example: retries=2 => up to 3 total attempts.
-          async function getText(url, extraHeaders = {}, retries = 2) {
+          async function getText(url, extraHeaders = {}, retries = RETRY_ATTEMPTS) {
             let lastError = null;
             for (let attempt = 0; attempt <= retries; attempt++) {
               try {
@@ -74,7 +75,7 @@ jobs:
                 if (!shouldRetry || attempt >= retries) break;
                 const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
                 const reason = Number.isFinite(statusCode) ? `HTTP ${statusCode}` : (e?.message || 'network error');
-                console.warn(`Transient ${reason} for ${url}; retrying in ${delayMs}ms (${attempt + 1}/${retries})`);
+                console.warn(`Transient ${reason} for ${url}; retry ${attempt + 1}/${retries}, next attempt ${attempt + 2}/${retries + 1} in ${delayMs}ms`);
                 await sleep(delayMs);
               }
             }
