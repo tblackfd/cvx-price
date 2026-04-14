@@ -138,6 +138,78 @@ jobs:
               return t.length ? { t, c } : null;
             }
 
+            // Yahoo Finance v7 CSV download — a separate endpoint that sometimes
+            // succeeds when the v8 JSON API is blocked.
+            function parseYahooCsv(csv) {
+              const lines = csv.trim().split(/\r?\n/).filter(Boolean);
+              // Expected header: Date,Open,High,Low,Close,Adj Close,Volume
+              if (!lines.length || !/^Date,/i.test(lines[0].trim())) return null;
+              const t = [];
+              const c = [];
+              for (const row of lines.slice(1)) {
+                const cols = row.split(',');
+                const date = cols[0]; // YYYY-MM-DD
+                const closeNum = Number(cols[4]); // Close column
+                if (!date || !Number.isFinite(closeNum)) continue;
+                const [y, m, d] = date.split('-');
+                const ts = Date.UTC(Number(y), Number(m) - 1, Number(d)) / 1000;
+                if (!Number.isFinite(ts)) continue;
+                t.push(ts);
+                c.push(closeNum);
+              }
+              return t.length ? { t, c } : null;
+            }
+
+            async function getYahooCsvCandles(host = 'query1') {
+              const csv = await getText(
+                `https://${host}.finance.yahoo.com/v7/finance/download/CVX?period1=${from}&period2=${now}&interval=1d&events=history`
+              );
+              return parseYahooCsv(csv);
+            }
+
+            // Nasdaq.com public API — used by Nasdaq's own website, no key needed.
+            // Rows come back newest-first; we sort to chronological order.
+            function parseNasdaqJson(json) {
+              const rows = json?.data?.tradesTable?.rows;
+              if (!Array.isArray(rows) || !rows.length) return null;
+              const t = [];
+              const c = [];
+              for (const row of rows) {
+                const dateStr = row?.date; // MM/DD/YYYY
+                const closeStr = String(row?.close || '').replace(/[$,]/g, '');
+                const closeNum = Number(closeStr);
+                if (!dateStr || !Number.isFinite(closeNum)) continue;
+                const parts = dateStr.split('/');
+                if (parts.length !== 3) continue;
+                const [mo, dy, yr] = parts;
+                const ts = Date.UTC(Number(yr), Number(mo) - 1, Number(dy)) / 1000;
+                if (!Number.isFinite(ts)) continue;
+                t.push(ts);
+                c.push(closeNum);
+              }
+              if (!t.length) return null;
+              // Sort chronologically (Nasdaq returns newest-first)
+              const idx = t.map((_, i) => i).sort((a, b) => t[a] - t[b]);
+              return { t: idx.map(i => t[i]), c: idx.map(i => c[i]) };
+            }
+
+            async function getNasdaqCandles() {
+              const fromDate = new Date(from * 1000).toISOString().slice(0, 10);
+              const toDate   = new Date(now  * 1000).toISOString().slice(0, 10);
+              const url = `https://api.nasdaq.com/api/quote/CVX/historical?assetclass=stocks&fromdate=${fromDate}&limit=9999&todate=${toDate}&type=1`;
+              const data = await getText(url, {
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+              });
+              let json;
+              try {
+                json = JSON.parse(data);
+              } catch (e) {
+                throw new Error('Nasdaq JSON parse error: ' + data.slice(0, 200));
+              }
+              return parseNasdaqJson(json);
+            }
+
             function getCachedCandles() {
               try {
                 if (!fs.existsSync('data.json')) return null;
@@ -194,7 +266,34 @@ jobs:
                 stock = await getYahooCandles('query2');
                 if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance (query2)`);
               } catch (e) {
-                console.warn(`Yahoo Finance query2 failed (${e.message})`);
+                console.warn(`Yahoo Finance query2 failed (${e.message}); trying Yahoo Finance CSV (query1)`);
+              }
+            }
+
+            if (!stock) {
+              try {
+                stock = await getYahooCsvCandles('query1');
+                if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance CSV (query1)`);
+              } catch (e) {
+                console.warn(`Yahoo Finance CSV query1 failed (${e.message}); trying Yahoo Finance CSV (query2)`);
+              }
+            }
+
+            if (!stock) {
+              try {
+                stock = await getYahooCsvCandles('query2');
+                if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance CSV (query2)`);
+              } catch (e) {
+                console.warn(`Yahoo Finance CSV query2 failed (${e.message}); trying Nasdaq`);
+              }
+            }
+
+            if (!stock) {
+              try {
+                stock = await getNasdaqCandles();
+                if (stock) console.log(`Got ${stock.t.length} candles from Nasdaq`);
+              } catch (e) {
+                console.warn(`Nasdaq request failed (${e.message})`);
               }
             }
 
