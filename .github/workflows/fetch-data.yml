@@ -36,6 +36,10 @@ jobs:
           function redactSecrets(input) {
             return String(input || '').replaceAll(API_KEY, '[REDACTED]');
           }
+
+          function isPlainObject(value) {
+            return value !== null && typeof value === 'object' && !Array.isArray(value);
+          }
  
           function getJson(url) {
             return new Promise((resolve, reject) => {
@@ -88,8 +92,6 @@ jobs:
           }
 
           async function fetchCVX() {
-            const isObject = (value) => value !== null && typeof value === 'object';
-
             const selectUSD = (v) => {
               const adjustedClose = Number(v['5. adjusted close']);
               if (Number.isFinite(adjustedClose) && adjustedClose > 0) return adjustedClose;
@@ -101,13 +103,13 @@ jobs:
             };
 
             const mapSeries = (series) => Object.entries(series)
-              .map(([date, v]) => ({ date, usd: isObject(v) ? selectUSD(v) : null }))
+              .map(([date, v]) => ({ date, usd: isPlainObject(v) ? selectUSD(v) : null }))
               .filter(row => row.usd !== null);
 
             const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
             const dailyJson = await getJson(dailyUrl);
             const dailySeries = dailyJson['Time Series (Daily)'];
-            if (!isObject(dailySeries)) {
+            if (!isPlainObject(dailySeries)) {
               const dailyInfo = dailyJson['Information'];
               throw new Error(
                 dailyInfo
@@ -143,18 +145,21 @@ jobs:
             try {
               const parsed = JSON.parse(fs.readFileSync('data.json', 'utf8'));
               if (!Array.isArray(parsed.data)) return [];
-              return parsed.data.filter(row =>
-                row &&
-                typeof row.date === 'string' &&
-                Number.isFinite(Number(row.usd)) && Number(row.usd) > 0 &&
-                Number.isFinite(Number(row.fx)) && Number(row.fx) > 0 &&
-                Number.isFinite(Number(row.aud)) && Number(row.aud) > 0
-              ).map(row => ({
-                date: row.date,
-                usd: Number(row.usd),
-                fx: Number(row.fx),
-                aud: Number(row.aud)
-              }));
+
+              const normalizeRow = (row) => {
+                if (!row || typeof row.date !== 'string') return null;
+                const usd = Number(row.usd);
+                const fx = Number(row.fx);
+                const aud = Number(row.aud);
+                if (!Number.isFinite(usd) || usd <= 0) return null;
+                if (!Number.isFinite(fx) || fx <= 0) return null;
+                if (!Number.isFinite(aud) || aud <= 0) return null;
+                return { date: row.date, usd, fx, aud };
+              };
+
+              return parsed.data
+                .map(normalizeRow)
+                .filter(Boolean);
             } catch {
               return [];
             }
