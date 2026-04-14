@@ -25,7 +25,15 @@ jobs:
 
           const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-          function getText(url, extraHeaders = {}) {
+          function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+          }
+
+          function isRetriableHttpStatus(statusCode) {
+            return statusCode === 429 || [500, 502, 503, 504].includes(statusCode);
+          }
+
+          function getTextOnce(url, extraHeaders = {}) {
             return new Promise((resolve, reject) => {
               https.get(url, { headers: { 'User-Agent': UA, ...extraHeaders } }, res => {
                 if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -39,6 +47,25 @@ jobs:
                 res.on('end', () => resolve(data));
               }).on('error', reject);
             });
+          }
+
+          async function getText(url, extraHeaders = {}, retries = 2) {
+            let lastError = null;
+            for (let attempt = 0; attempt <= retries; attempt++) {
+              try {
+                return await getTextOnce(url, extraHeaders);
+              } catch (e) {
+                lastError = e;
+                const match = /HTTP (\d+)/.exec(e?.message || '');
+                const statusCode = match ? Number(match[1]) : null;
+                const shouldRetry = Number.isFinite(statusCode) && isRetriableHttpStatus(statusCode);
+                if (!shouldRetry || attempt >= retries) throw e;
+                const delayMs = (attempt + 1) * 1500;
+                console.warn(`Transient HTTP ${statusCode} for ${url}; retrying in ${delayMs}ms (${attempt + 2}/${retries + 1})`);
+                await sleep(delayMs);
+              }
+            }
+            throw lastError || new Error(`Failed to fetch ${url}`);
           }
 
           async function getJson(url) {
@@ -97,6 +124,48 @@ jobs:
               return t.length ? { t, c } : null;
             }
 
+            async function getFinnhubCandles() {
+              if (!key) return null;
+              const candles = await getJson(
+                `https://finnhub.io/api/v1/stock/candle?symbol=CVX&resolution=D&from=${from}&to=${now}&token=${key}`
+              );
+              if (candles?.s !== 'ok' || !Array.isArray(candles?.t) || !Array.isArray(candles?.c)) return null;
+              const t = [];
+              const c = [];
+              for (let i = 0; i < candles.t.length; i++) {
+                const time = Number(candles.t[i]);
+                const closeNum = Number(candles.c[i]);
+                if (!Number.isFinite(time) || !Number.isFinite(closeNum)) continue;
+                t.push(time);
+                c.push(closeNum);
+              }
+              return t.length ? { t, c } : null;
+            }
+
+            function getCachedCandles() {
+              try {
+                if (!fs.existsSync('data.json')) return null;
+                const parsed = JSON.parse(fs.readFileSync('data.json', 'utf8'));
+                if (!Array.isArray(parsed?.data)) return null;
+                const t = [];
+                const c = [];
+                for (const row of parsed.data) {
+                  const date = row?.date;
+                  const usd = Number(row?.usd);
+                  if (!date || !Number.isFinite(usd)) continue;
+                  const [y, m, d] = String(date).split('-');
+                  const ts = Date.UTC(Number(y), Number(m) - 1, Number(d)) / 1000;
+                  if (!Number.isFinite(ts)) continue;
+                  t.push(ts);
+                  c.push(usd);
+                }
+                return t.length ? { t, c } : null;
+              } catch (e) {
+                console.warn(`Unable to read cached data.json (${e.message})`);
+                return null;
+              }
+            }
+
             // --- CVX historical candles from Stooq → Yahoo Finance ---
             console.log('Fetching CVX historical candles...');
             let stock = null;
@@ -129,6 +198,20 @@ jobs:
               } catch (e) {
                 console.warn(`Yahoo Finance query2 failed (${e.message})`);
               }
+            }
+
+            if (!stock) {
+              try {
+                stock = await getFinnhubCandles();
+                if (stock) console.log(`Got ${stock.t.length} candles from Finnhub historical API`);
+              } catch (e) {
+                console.warn(`Finnhub historical candles failed (${e.message})`);
+              }
+            }
+
+            if (!stock) {
+              stock = getCachedCandles();
+              if (stock) console.log(`Using ${stock.t.length} cached candles from data.json`);
             }
 
             if (!stock) throw new Error('No source returned CVX historical candle data');
