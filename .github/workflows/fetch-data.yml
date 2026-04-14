@@ -24,13 +24,14 @@ jobs:
           const fs    = require('fs');
 
           const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+          const RETRY_BASE_DELAY_MS = 1500;
 
           function sleep(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));
           }
 
           function isRetriableHttpStatus(statusCode) {
-            return statusCode === 429 || [500, 502, 503, 504].includes(statusCode);
+            return [429, 500, 502, 503, 504].includes(statusCode);
           }
 
           function isRetriableNetworkError(error) {
@@ -55,6 +56,8 @@ jobs:
             });
           }
 
+          // retries = number of retry attempts after the initial request.
+          // Example: retries=2 => up to 3 total attempts.
           async function getText(url, extraHeaders = {}, retries = 2) {
             let lastError = null;
             for (let attempt = 0; attempt <= retries; attempt++) {
@@ -68,14 +71,14 @@ jobs:
                   (Number.isFinite(statusCode) && isRetriableHttpStatus(statusCode)) ||
                   isRetriableNetworkError(e);
                 if (!shouldRetry || attempt >= retries) break;
-                const delayMs = (attempt + 1) * 1500;
+                const delayMs = (attempt + 1) * RETRY_BASE_DELAY_MS;
                 const reason = Number.isFinite(statusCode) ? `HTTP ${statusCode}` : (e?.message || 'network error');
                 console.warn(`Transient ${reason} for ${url}; retrying in ${delayMs}ms (${attempt + 2}/${retries + 1})`);
                 await sleep(delayMs);
               }
             }
-            if (lastError) throw lastError;
-            throw new Error(`Failed to fetch ${url}`);
+            if (!lastError) throw new Error(`Failed to fetch ${url}`);
+            throw lastError;
           }
 
           async function getJson(url) {
