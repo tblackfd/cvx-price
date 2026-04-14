@@ -33,6 +33,12 @@ jobs:
             return statusCode === 429 || [500, 502, 503, 504].includes(statusCode);
           }
 
+          function isRetriableNetworkError(error) {
+            const message = String(error?.message || '');
+            return ['EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND']
+              .some(code => message.includes(code));
+          }
+
           function getTextOnce(url, extraHeaders = {}) {
             return new Promise((resolve, reject) => {
               https.get(url, { headers: { 'User-Agent': UA, ...extraHeaders } }, res => {
@@ -58,14 +64,18 @@ jobs:
                 lastError = e;
                 const match = /HTTP (\d+)/.exec(e?.message || '');
                 const statusCode = match ? Number(match[1]) : null;
-                const shouldRetry = Number.isFinite(statusCode) && isRetriableHttpStatus(statusCode);
-                if (!shouldRetry || attempt >= retries) throw e;
+                const shouldRetry =
+                  (Number.isFinite(statusCode) && isRetriableHttpStatus(statusCode)) ||
+                  isRetriableNetworkError(e);
+                if (!shouldRetry || attempt >= retries) break;
                 const delayMs = (attempt + 1) * 1500;
-                console.warn(`Transient HTTP ${statusCode} for ${url}; retrying in ${delayMs}ms (${attempt + 2}/${retries + 1})`);
+                const reason = Number.isFinite(statusCode) ? `HTTP ${statusCode}` : (e?.message || 'network error');
+                console.warn(`Transient ${reason} for ${url}; retrying in ${delayMs}ms (${attempt + 2}/${retries + 1})`);
                 await sleep(delayMs);
               }
             }
-            throw lastError;
+            if (lastError) throw lastError;
+            throw new Error(`Failed to fetch ${url}`);
           }
 
           async function getJson(url) {
