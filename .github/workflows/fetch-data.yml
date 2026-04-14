@@ -23,17 +23,26 @@ jobs:
           const https = require('https');
           const fs    = require('fs');
 
-          function get(url) {
+          function getText(url) {
             return new Promise((resolve, reject) => {
               https.get(url, res => {
+                if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                  return resolve(getText(res.headers.location));
+                }
                 let data = '';
                 res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                  try { resolve(JSON.parse(data)); }
-                  catch(e) { reject(new Error('JSON parse error: ' + data.slice(0, 200))); }
-                });
+                res.on('end', () => resolve(data));
               }).on('error', reject);
             });
+          }
+
+          async function getJson(url) {
+            const data = await getText(url);
+            try {
+              return JSON.parse(data);
+            } catch (e) {
+              throw new Error('JSON parse error: ' + data.slice(0, 200));
+            }
           }
 
           async function main() {
@@ -43,17 +52,44 @@ jobs:
 
             // --- CVX stock candles from Finnhub ---
             console.log('Fetching CVX candles...');
-            const stock = await get(
-              `https://finnhub.io/api/v1/stock/candle?symbol=CVX&resolution=D&from=${from}&to=${now}&token=${key}`
-            );
-            if (stock.s !== 'ok') throw new Error('Finnhub error: ' + stock.s);
-            console.log(`Got ${stock.t.length} candles`);
+            let stock = null;
+            if (key) {
+              const finnhub = await getJson(
+                `https://finnhub.io/api/v1/stock/candle?symbol=CVX&resolution=D&from=${from}&to=${now}&token=${key}`
+              );
+              if (finnhub?.s === 'ok' && Array.isArray(finnhub.t) && Array.isArray(finnhub.c)) {
+                stock = finnhub;
+                console.log(`Got ${stock.t.length} candles from Finnhub`);
+              } else {
+                const reason = finnhub?.error || finnhub?.s || 'unknown error';
+                console.warn(`Finnhub failed (${reason}); falling back to Stooq daily data`);
+              }
+            } else {
+              console.warn('FINNHUB_KEY is not set; falling back to Stooq daily data');
+            }
+
+            if (!stock) {
+              const csv = await getText('https://stooq.com/q/d/l/?s=cvx.us&i=d');
+              const rows = csv.trim().split('\n').slice(1).filter(Boolean);
+              const t = [];
+              const c = [];
+              for (const row of rows) {
+                const [date, , , , close] = row.split(',');
+                const closeNum = Number(close);
+                if (!date || !Number.isFinite(closeNum)) continue;
+                t.push(Math.floor(new Date(`${date}T00:00:00Z`).getTime() / 1000));
+                c.push(closeNum);
+              }
+              if (!t.length) throw new Error('Stooq fallback returned no CVX candle data');
+              stock = { t, c };
+              console.log(`Got ${stock.t.length} candles from Stooq fallback`);
+            }
 
             // --- AUD/USD history from Frankfurter ---
             console.log('Fetching AUD/USD rates...');
             const today = new Date().toISOString().slice(0, 10);
-            const fx = await get(
-              `https://api.frankfurter.dev/v1/1999-01-04..${today}?from=USD&to=AUD`
+            const fx = await getJson(
+              `https://api.frankfurter.app/v1/1999-01-04..${today}?from=USD&to=AUD`
             );
             if (!fx.rates) throw new Error('Frankfurter error: no rates');
             console.log(`Got ${Object.keys(fx.rates).length} FX dates`);
