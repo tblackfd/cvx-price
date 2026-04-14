@@ -29,43 +29,70 @@ jobs:
           const MAX_USD = 1000;
           const MIN_FX = 0.4;
           const MAX_FX = 1.0;
+          const REQUEST_TIMEOUT_MS = 30000;
           const RATE_LIMIT_PATTERN = /rate limit|premium endpoint|free API requests|requests per day|requests per second|spreading out/i;
+          const TRANSIENT_NETWORK_PATTERN = /econnreset|etimedout|eai_again|enotfound|socket hang up|network/i;
+ 
+          function redactSecrets(input) {
+            return String(input || '').replaceAll(API_KEY, '[REDACTED]');
+          }
 
+          function isPlainObject(value) {
+            return value !== null && typeof value === 'object' && !Array.isArray(value);
+          }
+ 
           function getJson(url) {
             return new Promise((resolve, reject) => {
-              https.get(url, res => {
+              const req = https.get(url, res => {
                 let data = '';
                 res.on('data', chunk => data += chunk);
                 res.on('end', () => {
                   if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
                     return reject(new Error(`HTTP ${res.statusCode || 'unknown'} from Alpha Vantage`));
                   }
+
+                  let parsed;
                   try {
-                    const parsed = JSON.parse(data);
-                    const note = parsed['Note'];
-                    const apiError = parsed['Error Message'];
-                    if (note || apiError) {
-                      const details = `${apiError || note}${apiError && note ? ` | Note: ${note}` : ''}`;
-                      const err = new Error(`API limit or error: ${details}`);
-                      if (RATE_LIMIT_PATTERN.test(details)) {
-                        err.code = 'ALPHA_VANTAGE_RATE_LIMIT';
-                      }
-                      throw err;
-                    }
-                    resolve(parsed);
+                    parsed = JSON.parse(data);
                   } catch (e) {
-                    const preview = data.slice(0, 120).replaceAll(API_KEY, '[REDACTED]');
-                    const safeMessage = String(e.message || 'unknown').replaceAll(API_KEY, '[REDACTED]');
+                    const preview = redactSecrets(data.slice(0, 120));
+                    const safeMessage = redactSecrets(e.message || 'unknown');
                     reject(new Error(`JSON parse error: ${safeMessage}. Body preview: ${preview}`));
+                    return;
                   }
+
+                  const note = parsed['Note'];
+                  const info = parsed['Information'];
+                  const apiError = parsed['Error Message'];
+                  if (note || info || apiError) {
+                    const errorFields = [apiError, info, note];
+                    const details = redactSecrets(errorFields.filter(Boolean).join(' | '));
+                    const err = new Error(`API error: ${details}`);
+                    err.code = RATE_LIMIT_PATTERN.test(details)
+                      ? 'ALPHA_VANTAGE_RATE_LIMIT'
+                      : 'ALPHA_VANTAGE_API_ERROR';
+                    reject(err);
+                    return;
+                  }
+
+                  resolve(parsed);
                 });
-              }).on('error', reject);
+              });
+
+              req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+                req.destroy(new Error(`Request timed out after ${REQUEST_TIMEOUT_MS}ms`));
+              });
+              req.on('error', (err) => {
+                const wrapped = new Error(`Network error while fetching Alpha Vantage data: ${redactSecrets(err.message || err)}`);
+                wrapped.code = TRANSIENT_NETWORK_PATTERN.test(String(err.message || ''))
+                  ? 'ALPHA_VANTAGE_TRANSIENT_NETWORK'
+                  : 'ALPHA_VANTAGE_NETWORK_ERROR';
+                reject(wrapped);
+              });
             });
           }
 
           async function fetchCVX() {
-            const isObject = (value) => value !== null && typeof value === 'object';
-
             const selectUSD = (v) => {
               const adjustedClose = Number(v['5. adjusted close']);
               if (Number.isFinite(adjustedClose) && adjustedClose > 0) return adjustedClose;
@@ -77,13 +104,13 @@ jobs:
             };
 
             const mapSeries = (series) => Object.entries(series)
-              .map(([date, v]) => ({ date, usd: isObject(v) ? selectUSD(v) : null }))
+              .map(([date, v]) => ({ date, usd: isPlainObject(v) ? selectUSD(v) : null }))
               .filter(row => row.usd !== null);
 
             const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
             const dailyJson = await getJson(dailyUrl);
             const dailySeries = dailyJson['Time Series (Daily)'];
-            if (!dailySeries) {
+            if (!isPlainObject(dailySeries)) {
               const dailyInfo = dailyJson['Information'];
               throw new Error(
                 dailyInfo
@@ -100,9 +127,9 @@ jobs:
           async function fetchFX() {
             const url = `https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=AUD&to_symbol=USD&outputsize=compact&apikey=${API_KEY}`;
             const json = await getJson(url);
-
+ 
             const series = json['Time Series FX (Daily)'];
-            if (!series) {
+            if (!isPlainObject(series)) {
               const info = json['Information'];
               throw new Error(info ? `Missing FX series: ${info}` : 'Missing FX series');
             }
@@ -119,7 +146,21 @@ jobs:
             try {
               const parsed = JSON.parse(fs.readFileSync('data.json', 'utf8'));
               if (!Array.isArray(parsed.data)) return [];
-              return parsed.data;
+
+              const normalizeRow = (row) => {
+                if (!row || typeof row.date !== 'string') return null;
+                const usd = Number(row.usd);
+                const fx = Number(row.fx);
+                const aud = Number(row.aud);
+                if (!Number.isFinite(usd) || usd <= 0) return null;
+                if (!Number.isFinite(fx) || fx <= 0) return null;
+                if (!Number.isFinite(aud) || aud <= 0) return null;
+                return { date: row.date, usd, fx, aud };
+              };
+
+              return parsed.data
+                .map(normalizeRow)
+                .filter(Boolean);
             } catch {
               return [];
             }
@@ -206,8 +247,8 @@ jobs:
               console.log('Fetching latest FX...');
               fx = await fetchFX();
             } catch (err) {
-              if (err?.code === 'ALPHA_VANTAGE_RATE_LIMIT') {
-                console.warn(`Alpha Vantage rate limit hit, keeping existing data unchanged: ${err.message}`);
+              if (err?.code === 'ALPHA_VANTAGE_RATE_LIMIT' || err?.code === 'ALPHA_VANTAGE_TRANSIENT_NETWORK') {
+                console.warn(`Temporary Alpha Vantage issue, keeping existing data unchanged: ${err.message}`);
                 return;
               }
               throw err;
