@@ -852,7 +852,7 @@
     const end   = toISO(new Date());
     const start = '1999-01-04'; // earliest ECB/Frankfurter data for AUD
     const r = await fetch(
-      `https://api.frankfurter.app/${start}..${end}?from=USD&to=AUD`,
+      `https://api.frankfurter.dev/v1/${start}..${end}?from=USD&to=AUD`,
       { signal: AbortSignal.timeout(15_000) }
     );
     if (!r.ok) throw new Error(`FX fetch error: HTTP ${r.status}`);
