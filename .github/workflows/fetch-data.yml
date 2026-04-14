@@ -2,7 +2,7 @@ name: Fetch CVX Data
 
 on:
   schedule:
-    - cron: '0 * * * *'   # every hour
+    - cron: '0 */6 * * *'   # every 6 hours (keeps free-tier API usage well below daily limits)
   workflow_dispatch:        # allow manual trigger from GitHub UI
 
 jobs:
@@ -29,6 +29,7 @@ jobs:
           const MAX_USD = 1000;
           const MIN_FX = 0.4;
           const MAX_FX = 1.0;
+          const RATE_LIMIT_PATTERN = /rate limit|premium endpoint|free API requests|requests per day|requests per second|spreading out/i;
 
           function getJson(url) {
             return new Promise((resolve, reject) => {
@@ -44,9 +45,12 @@ jobs:
                     const note = parsed['Note'];
                     const apiError = parsed['Error Message'];
                     if (note || apiError) {
-                      throw new Error(
-                        `API limit or error: ${apiError || note}${apiError && note ? ` | Note: ${note}` : ''}`
-                      );
+                      const details = `${apiError || note}${apiError && note ? ` | Note: ${note}` : ''}`;
+                      const err = new Error(`API limit or error: ${details}`);
+                      if (RATE_LIMIT_PATTERN.test(details)) {
+                        err.code = 'ALPHA_VANTAGE_RATE_LIMIT';
+                      }
+                      throw err;
                     }
                     resolve(parsed);
                   } catch (e) {
@@ -76,18 +80,6 @@ jobs:
               .map(([date, v]) => ({ date, usd: isObject(v) ? selectUSD(v) : null }))
               .filter(row => row.usd !== null);
 
-            const adjustedUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
-            const adjustedJson = await getJson(adjustedUrl);
-            const adjustedSeries = adjustedJson['Time Series (Daily)'];
-            if (adjustedSeries) {
-              const rows = mapSeries(adjustedSeries);
-              if (rows.length > 0) return rows;
-              console.warn('TIME_SERIES_DAILY_ADJUSTED returned no valid rows, falling back to TIME_SERIES_DAILY');
-            } else {
-              const info = adjustedJson['Information'];
-              if (info) console.warn(`TIME_SERIES_DAILY_ADJUSTED unavailable, falling back: ${info}`);
-            }
-
             const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
             const dailyJson = await getJson(dailyUrl);
             const dailySeries = dailyJson['Time Series (Daily)'];
@@ -95,8 +87,8 @@ jobs:
               const dailyInfo = dailyJson['Information'];
               throw new Error(
                 dailyInfo
-                  ? `Missing CVX series from adjusted and daily endpoints: ${dailyInfo}`
-                  : 'Missing CVX series from adjusted and daily endpoints'
+                  ? `Missing CVX series from daily endpoint: ${dailyInfo}`
+                  : 'Missing CVX series from daily endpoint'
               );
             }
 
@@ -205,11 +197,21 @@ jobs:
 
             console.log(`Existing rows: ${existing.length}`);
 
-            console.log('Fetching latest CVX...');
-            const stock = await fetchCVX();
+            let stock;
+            let fx;
+            try {
+              console.log('Fetching latest CVX...');
+              stock = await fetchCVX();
 
-            console.log('Fetching latest FX...');
-            const fx = await fetchFX();
+              console.log('Fetching latest FX...');
+              fx = await fetchFX();
+            } catch (err) {
+              if (err?.code === 'ALPHA_VANTAGE_RATE_LIMIT') {
+                console.warn(`Alpha Vantage rate limit hit, keeping existing data unchanged: ${err.message}`);
+                return;
+              }
+              throw err;
+            }
 
             const merged = merge(existing, stock, fx);
 
