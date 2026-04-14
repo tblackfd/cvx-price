@@ -64,12 +64,16 @@ jobs:
               .map(([date, v]) => {
                 const adjustedClose = Number(v['5. adjusted close']);
                 const close = Number(v['4. close']);
+                const usd =
+                  Number.isFinite(adjustedClose) && adjustedClose > 0
+                    ? adjustedClose
+                    : (Number.isFinite(close) && close > 0 ? close : null);
                 return {
                   date,
-                  usd: Number.isFinite(adjustedClose) && adjustedClose > 0 ? adjustedClose : close
+                  usd
                 };
               })
-              .filter(row => Number.isFinite(row.usd) && row.usd > 0);
+              .filter(row => row.usd !== null);
 
             const adjustedUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
             const adjustedJson = await getJson(adjustedUrl);
@@ -77,6 +81,7 @@ jobs:
             if (adjustedSeries) {
               const rows = mapSeries(adjustedSeries);
               if (rows.length > 0) return rows;
+              console.warn('TIME_SERIES_DAILY_ADJUSTED returned no valid rows, falling back to TIME_SERIES_DAILY');
             }
 
             const info = adjustedJson['Information'];
