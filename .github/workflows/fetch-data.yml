@@ -76,8 +76,6 @@ jobs:
 
             const adjustedUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
             const adjustedJson = await getJson(adjustedUrl);
-            // Alpha Vantage uses the same "Time Series (Daily)" key for both
-            // TIME_SERIES_DAILY_ADJUSTED and TIME_SERIES_DAILY responses.
             const adjustedSeries = adjustedJson['Time Series (Daily)'];
             if (adjustedSeries) {
               const rows = mapSeries(adjustedSeries);
