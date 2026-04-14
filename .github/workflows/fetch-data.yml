@@ -60,6 +60,8 @@ jobs:
           }
 
           async function fetchCVX() {
+            const isObject = (value) => value !== null && typeof value === 'object';
+
             const selectUSD = (v) => {
               const adjustedClose = Number(v['5. adjusted close']);
               if (Number.isFinite(adjustedClose) && adjustedClose > 0) return adjustedClose;
@@ -71,7 +73,7 @@ jobs:
             };
 
             const mapSeries = (series) => Object.entries(series)
-              .map(([date, v]) => ({ date, usd: (v && typeof v === 'object') ? selectUSD(v) : null }))
+              .map(([date, v]) => ({ date, usd: isObject(v) ? selectUSD(v) : null }))
               .filter(row => row.usd !== null);
 
             const adjustedUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
@@ -81,10 +83,10 @@ jobs:
               const rows = mapSeries(adjustedSeries);
               if (rows.length > 0) return rows;
               console.warn('TIME_SERIES_DAILY_ADJUSTED returned no valid rows, falling back to TIME_SERIES_DAILY');
+            } else {
+              const info = adjustedJson['Information'];
+              if (info) console.warn(`TIME_SERIES_DAILY_ADJUSTED unavailable, falling back: ${info}`);
             }
-
-            const info = adjustedJson['Information'];
-            if (info) console.warn(`TIME_SERIES_DAILY_ADJUSTED unavailable, falling back: ${info}`);
 
             const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
             const dailyJson = await getJson(dailyUrl);
