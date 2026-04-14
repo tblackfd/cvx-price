@@ -32,6 +32,8 @@ jobs:
           const REQUEST_TIMEOUT_MS = 30000;
           const RATE_LIMIT_PATTERN = /rate limit|premium endpoint|free API requests|requests per day|requests per second|spreading out/i;
           const TRANSIENT_NETWORK_PATTERN = /econnreset|etimedout|eai_again|enotfound|socket hang up|network/i;
+          const RETRY_ATTEMPTS = 3;
+          const RETRY_BASE_DELAY_MS = 1500;
  
           function redactSecrets(input) {
             return String(input || '').replaceAll(API_KEY, '[REDACTED]');
@@ -39,6 +41,30 @@ jobs:
 
           function isPlainObject(value) {
             return value !== null && typeof value === 'object' && !Array.isArray(value);
+          }
+
+          function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+          }
+
+          function isRetryableAlphaVantageError(err) {
+            return err?.code === 'ALPHA_VANTAGE_RATE_LIMIT' || err?.code === 'ALPHA_VANTAGE_TRANSIENT_NETWORK';
+          }
+
+          async function fetchWithRetry(label, fn) {
+            let lastErr;
+            for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+              try {
+                return await fn();
+              } catch (err) {
+                lastErr = err;
+                if (!isRetryableAlphaVantageError(err) || attempt === RETRY_ATTEMPTS) break;
+                const waitMs = RETRY_BASE_DELAY_MS * attempt;
+                console.warn(`${label} attempt ${attempt} failed (${err.message}). Retrying in ${waitMs}ms...`);
+                await sleep(waitMs);
+              }
+            }
+            throw lastErr;
           }
  
           function getJson(url) {
@@ -242,12 +268,17 @@ jobs:
             let fx;
             try {
               console.log('Fetching latest CVX...');
-              stock = await fetchCVX();
+              stock = await fetchWithRetry('CVX', fetchCVX);
 
+              // Space requests to respect Alpha Vantage free-tier burst limits.
+              await sleep(1200);
               console.log('Fetching latest FX...');
-              fx = await fetchFX();
+              fx = await fetchWithRetry('FX', fetchFX);
             } catch (err) {
-              if (err?.code === 'ALPHA_VANTAGE_RATE_LIMIT' || err?.code === 'ALPHA_VANTAGE_TRANSIENT_NETWORK') {
+              if (isRetryableAlphaVantageError(err)) {
+                if (existing.length === 0) {
+                  throw new Error(`Temporary Alpha Vantage issue with no existing data to keep: ${err.message}`);
+                }
                 console.warn(`Temporary Alpha Vantage issue, keeping existing data unchanged: ${err.message}`);
                 return;
               }
