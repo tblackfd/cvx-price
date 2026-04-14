@@ -51,7 +51,8 @@ jobs:
                     resolve(parsed);
                   } catch (e) {
                     const preview = data.slice(0, 120).replaceAll(API_KEY, '[REDACTED]');
-                    reject(new Error(`JSON parse error: ${e.message}. Body preview: ${preview}`));
+                    const safeMessage = String(e.message || 'unknown').replaceAll(API_KEY, '[REDACTED]');
+                    reject(new Error(`JSON parse error: ${safeMessage}. Body preview: ${preview}`));
                   }
                 });
               }).on('error', reject);
