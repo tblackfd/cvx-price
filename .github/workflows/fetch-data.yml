@@ -71,11 +71,13 @@ jobs:
             };
 
             const mapSeries = (series) => Object.entries(series)
-              .map(([date, v]) => ({ date, usd: selectUSD(v) }))
+              .map(([date, v]) => ({ date, usd: (v && typeof v === 'object') ? selectUSD(v) : null }))
               .filter(row => row.usd !== null);
 
             const adjustedUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
             const adjustedJson = await getJson(adjustedUrl);
+            // Alpha Vantage uses the same "Time Series (Daily)" key for both
+            // TIME_SERIES_DAILY_ADJUSTED and TIME_SERIES_DAILY responses.
             const adjustedSeries = adjustedJson['Time Series (Daily)'];
             if (adjustedSeries) {
               const rows = mapSeries(adjustedSeries);
