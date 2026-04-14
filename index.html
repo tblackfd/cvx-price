@@ -1,0 +1,97 @@
+name: Fetch CVX Data
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # every hour
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fetch CVX + AUD/USD data
+        env:
+          FINNHUB_KEY: ${{ secrets.FINNHUB_KEY }}
+        run: |
+          node - <<'EOF'
+          const https = require('https');
+          const fs    = require('fs');
+
+          function get(url) {
+            return new Promise((resolve, reject) => {
+              https.get(url, res => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                  try { resolve(JSON.parse(data)); }
+                  catch(e) { reject(new Error('JSON parse error: ' + data.slice(0, 200))); }
+                });
+              }).on('error', reject);
+            });
+          }
+
+          async function main() {
+            const key  = process.env.FINNHUB_KEY;
+            const now  = Math.floor(Date.now() / 1000);
+            const from = now - 10 * 365 * 24 * 60 * 60; // 10 years
+
+            // --- CVX stock candles from Finnhub ---
+            console.log('Fetching CVX candles...');
+            const stock = await get(
+              `https://finnhub.io/api/v1/stock/candle?symbol=CVX&resolution=D&from=${from}&to=${now}&token=${key}`
+            );
+            if (stock.s !== 'ok') throw new Error('Finnhub error: ' + stock.s);
+            console.log(`Got ${stock.t.length} candles`);
+
+            // --- AUD/USD history from Frankfurter ---
+            console.log('Fetching AUD/USD rates...');
+            const today = new Date().toISOString().slice(0, 10);
+            const fx = await get(
+              `https://api.frankfurter.dev/v1/1999-01-04..${today}?from=USD&to=AUD`
+            );
+            if (!fx.rates) throw new Error('Frankfurter error: no rates');
+            console.log(`Got ${Object.keys(fx.rates).length} FX dates`);
+
+            // --- Build merged data array ---
+            const fxDates = Object.keys(fx.rates).sort();
+
+            function nearestFX(isoDate) {
+              if (fx.rates[isoDate]) return fx.rates[isoDate].AUD;
+              const prev = fxDates.filter(d => d <= isoDate);
+              return prev.length ? fx.rates[prev[prev.length - 1]].AUD : null;
+            }
+
+            const merged = stock.t.map((ts, i) => {
+              const date    = new Date(ts * 1000).toISOString().slice(0, 10);
+              const usd     = stock.c[i];
+              const audPerUsd = nearestFX(date);
+              const aud     = audPerUsd ? usd * audPerUsd : null;
+              const fx_rate = audPerUsd ? 1 / audPerUsd : null;
+              return { date, usd, aud, fx: fx_rate };
+            }).filter(d => d.aud !== null && d.usd !== null);
+
+            const output = {
+              updated: new Date().toISOString(),
+              data: merged,
+            };
+
+            fs.writeFileSync('data.json', JSON.stringify(output));
+            console.log(`Wrote ${merged.length} rows to data.json`);
+          }
+
+          main().catch(e => { console.error(e); process.exit(1); });
+          EOF
+
+      - name: Commit data.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data.json
+          git diff --staged --quiet || git commit -m "chore: update CVX data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
