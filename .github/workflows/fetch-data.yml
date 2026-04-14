@@ -23,11 +23,13 @@ jobs:
           const https = require('https');
           const fs    = require('fs');
 
-          function getText(url) {
+          const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+          function getText(url, extraHeaders = {}) {
             return new Promise((resolve, reject) => {
-              https.get(url, res => {
+              https.get(url, { headers: { 'User-Agent': UA, ...extraHeaders } }, res => {
                 if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                  return resolve(getText(res.headers.location));
+                  return resolve(getText(res.headers.location, extraHeaders));
                 }
                 if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
                   return reject(new Error(`HTTP ${res.statusCode || 'unknown'} for ${url}`));
@@ -75,9 +77,9 @@ jobs:
               return t.length ? { t, c } : null;
             }
 
-            async function getYahooCandles() {
+            async function getYahooCandles(host = 'query1') {
               const yahoo = await getJson(
-                `https://query1.finance.yahoo.com/v8/finance/chart/CVX?period1=${from}&period2=${now}&interval=1d&events=history`
+                `https://${host}.finance.yahoo.com/v8/finance/chart/CVX?period1=${from}&period2=${now}&interval=1d&events=history`
               );
               const result = yahoo?.chart?.result?.[0];
               const ts = result?.timestamp;
@@ -105,17 +107,31 @@ jobs:
               if (stock) {
                 console.log(`Got ${stock.t.length} candles from Stooq`);
               } else {
-                console.warn('Stooq returned unusable CSV; trying Yahoo Finance');
+                console.warn(`Stooq returned unusable CSV (first 100 chars: ${csv.slice(0, 100).replace(/\r?\n/g, ' ')}); trying Yahoo Finance`);
               }
             } catch (e) {
               console.warn(`Stooq request failed (${e.message}); trying Yahoo Finance`);
             }
 
             if (!stock) {
-              stock = await getYahooCandles();
-              if (!stock) throw new Error('No source returned CVX historical candle data');
-              console.log(`Got ${stock.t.length} candles from Yahoo Finance`);
+              try {
+                stock = await getYahooCandles('query1');
+                if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance (query1)`);
+              } catch (e) {
+                console.warn(`Yahoo Finance query1 failed (${e.message}); trying query2`);
+              }
             }
+
+            if (!stock) {
+              try {
+                stock = await getYahooCandles('query2');
+                if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance (query2)`);
+              } catch (e) {
+                console.warn(`Yahoo Finance query2 failed (${e.message})`);
+              }
+            }
+
+            if (!stock) throw new Error('No source returned CVX historical candle data');
 
             // --- Finnhub current quote (free tier: /quote endpoint) ---
             let finnhubQuote = null;
