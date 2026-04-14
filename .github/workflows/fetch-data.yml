@@ -47,7 +47,9 @@ jobs:
                   return resolve(getText(res.headers.location, extraHeaders));
                 }
                 if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-                  return reject(new Error(`HTTP ${res.statusCode || 'unknown'} for ${url}`));
+                  const err = new Error(`HTTP ${res.statusCode || 'unknown'} for ${url}`);
+                  err.statusCode = res.statusCode || null;
+                  return reject(err);
                 }
                 let data = '';
                 res.on('data', chunk => data += chunk);
@@ -65,15 +67,14 @@ jobs:
                 return await getTextOnce(url, extraHeaders);
               } catch (e) {
                 lastError = e;
-                const match = /HTTP (\d+)/.exec(e?.message || '');
-                const statusCode = match ? Number(match[1]) : null;
+                const statusCode = Number(e?.statusCode);
                 const shouldRetry =
                   (Number.isFinite(statusCode) && isRetriableHttpStatus(statusCode)) ||
                   isRetriableNetworkError(e);
                 if (!shouldRetry || attempt >= retries) break;
                 const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
                 const reason = Number.isFinite(statusCode) ? `HTTP ${statusCode}` : (e?.message || 'network error');
-                console.warn(`Transient ${reason} for ${url}; retrying in ${delayMs}ms (${attempt + 2}/${retries + 1})`);
+                console.warn(`Transient ${reason} for ${url}; retrying in ${delayMs}ms (${attempt + 1}/${retries})`);
                 await sleep(delayMs);
               }
             }
