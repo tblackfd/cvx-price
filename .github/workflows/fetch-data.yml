@@ -75,7 +75,7 @@ jobs:
                 if (!shouldRetry || attempt >= retries) break;
                 const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
                 const reason = Number.isFinite(statusCode) ? `HTTP ${statusCode}` : (e?.message || 'network error');
-                console.warn(`Transient ${reason} for ${url}; retry ${attempt + 1}/${retries}, next attempt ${attempt + 2}/${retries + 1} in ${delayMs}ms`);
+                console.warn(`Transient ${reason} for ${url}; retry ${attempt + 1}/${retries} in ${delayMs}ms`);
                 await sleep(delayMs);
               }
             }
@@ -159,7 +159,7 @@ jobs:
                 }
                 return t.length ? { t, c } : null;
               } catch (e) {
-                console.warn(`Unable to read cached data.json (${e.message})`);
+                console.warn(`Unable to read cached data.json (${e?.message || e})`);
                 return null;
               }
             }
