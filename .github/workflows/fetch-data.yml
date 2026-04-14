@@ -17,375 +17,155 @@ jobs:
 
       - name: Fetch CVX + AUD/USD data
         env:
-          FINNHUB_KEY: ${{ secrets.FINNHUB_KEY }}
+          ALPHA_VANTAGE_KEY: ${{ secrets.ALPHA_VANTAGE_KEY }}
         run: |
           node - <<'EOF'
           const https = require('https');
-          const fs    = require('fs');
+          const fs = require('fs');
 
-          const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-          const RETRY_ATTEMPTS = 2;
-          const RETRY_BASE_DELAY_MS = 1500;
+          const API_KEY = process.env.ALPHA_VANTAGE_KEY;
+          if (!API_KEY) throw new Error('Missing ALPHA_VANTAGE_KEY');
 
-          function sleep(ms) {
-            return new Promise(resolve => setTimeout(resolve, ms));
-          }
-
-          function isRetriableHttpStatus(statusCode) {
-            return [429, 500, 502, 503, 504].includes(statusCode);
-          }
-
-          function isRetriableNetworkError(error) {
-            const message = String(error?.message || '');
-            return ['EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ECONNREFUSED', 'ENOTFOUND']
-              .some(code => message.includes(code));
-          }
-
-          function getTextOnce(url, extraHeaders = {}) {
+          function getJson(url) {
             return new Promise((resolve, reject) => {
-              https.get(url, { headers: { 'User-Agent': UA, ...extraHeaders } }, res => {
-                if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                  return resolve(getTextOnce(res.headers.location, extraHeaders));
-                }
-                if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-                  const err = new Error(`HTTP ${res.statusCode || 'unknown'} for ${url}`);
-                  err.statusCode = res.statusCode || null;
-                  return reject(err);
-                }
+              https.get(url, res => {
                 let data = '';
                 res.on('data', chunk => data += chunk);
-                res.on('end', () => resolve(data));
+                res.on('end', () => {
+                  try {
+                    const parsed = JSON.parse(data);
+                    if (parsed['Note'] || parsed['Error Message']) {
+                      throw new Error('API limit or error: ' + JSON.stringify(parsed).slice(0, 200));
+                    }
+                    resolve(parsed);
+                  } catch (e) {
+                    reject(new Error('JSON parse/API error: ' + data.slice(0, 200)));
+                  }
+                });
               }).on('error', reject);
             });
           }
 
-          // retries = number of retry attempts after the initial request.
-          // Example: retries=2 => up to 3 total attempts.
-          async function getText(url, extraHeaders = {}, retries = RETRY_ATTEMPTS) {
-            let lastError = null;
-            for (let attempt = 0; attempt <= retries; attempt++) {
-              try {
-                return await getTextOnce(url, extraHeaders);
-              } catch (e) {
-                lastError = e;
-                const statusCode = Number(e?.statusCode);
-                const shouldRetry =
-                  (Number.isFinite(statusCode) && isRetriableHttpStatus(statusCode)) ||
-                  isRetriableNetworkError(e);
-                if (!shouldRetry || attempt >= retries) break;
-                const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-                const reason = Number.isFinite(statusCode) ? `HTTP ${statusCode}` : (e?.message || 'network error');
-                console.warn(`Transient ${reason} for ${url}; retry ${attempt + 1}/${retries} in ${delayMs}ms`);
-                await sleep(delayMs);
-              }
-            }
-            throw lastError;
+          async function fetchCVX() {
+            const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
+            const json = await getJson(url);
+
+            const series = json['Time Series (Daily)'];
+            if (!series) throw new Error('Missing CVX series');
+
+            return Object.entries(series).map(([date, v]) => ({
+              date,
+              usd: Number(v['5. adjusted close']) // better long-term metric
+            }));
           }
 
-          async function getJson(url) {
-            const data = await getText(url);
+          async function fetchFX() {
+            const url = `https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=AUD&to_symbol=USD&outputsize=compact&apikey=${API_KEY}`;
+            const json = await getJson(url);
+
+            const series = json['Time Series FX (Daily)'];
+            if (!series) throw new Error('Missing FX series');
+
+            return Object.entries(series).map(([date, v]) => ({
+              date,
+              fx: Number(v['4. close'])
+            }));
+          }
+
+          function loadExisting() {
+            if (!fs.existsSync('data.json')) return [];
+
             try {
-              return JSON.parse(data);
-            } catch (e) {
-              throw new Error('JSON parse error: ' + data.slice(0, 200));
+              const parsed = JSON.parse(fs.readFileSync('data.json', 'utf8'));
+              if (!Array.isArray(parsed.data)) return [];
+              return parsed.data;
+            } catch {
+              return [];
             }
+          }
+
+          function validateRow(row) {
+            if (!row.date || typeof row.date !== 'string') return false;
+            if (!Number.isFinite(row.usd) || row.usd <= 0) return false;
+            if (!Number.isFinite(row.fx) || row.fx <= 0) return false;
+            if (!Number.isFinite(row.aud) || row.aud <= 0) return false;
+
+            // sanity bounds (prevents API corruption)
+            if (row.usd < 10 || row.usd > 1000) return false;
+            if (row.fx < 0.4 || row.fx > 1.0) return false;
+
+            return true;
+          }
+
+          function merge(existing, stock, fx) {
+            const fxMap = new Map(fx.map(d => [d.date, d.fx]));
+            const fxDates = fx.map(d => d.date).sort();
+
+            function getFX(date) {
+              if (fxMap.has(date)) return fxMap.get(date);
+              const prev = fxDates.filter(d => d <= date);
+              return prev.length ? fxMap.get(prev[prev.length - 1]) : null;
+            }
+
+            const existingMap = new Map(existing.map(d => [d.date, d]));
+            let added = 0;
+
+            for (const s of stock) {
+              if (existingMap.has(s.date)) continue;
+
+              const fxRate = getFX(s.date);
+              if (!fxRate) continue;
+
+              const row = {
+                date: s.date,
+                usd: s.usd,
+                aud: s.usd / fxRate,
+                fx: fxRate
+              };
+
+              if (!validateRow(row)) {
+                console.warn(`Skipping invalid row ${s.date}`);
+                continue;
+              }
+
+              existingMap.set(s.date, row);
+              added++;
+            }
+
+            const merged = Array.from(existingMap.values())
+              .sort((a, b) => a.date.localeCompare(b.date));
+
+            console.log(`Added ${added} new rows`);
+            return merged;
           }
 
           async function main() {
-            const key  = process.env.FINNHUB_KEY;
-            const now  = Math.floor(Date.now() / 1000);
-            const from = now - 10 * 365 * 24 * 60 * 60; // 10 years
-            
-            function parseStooqCsv(csv) {
-              const lines = csv.trim().split(/\r?\n/).filter(Boolean);
-              if (!lines.length || !/^Date,Open,High,Low,Close,Volume$/i.test(lines[0].trim())) {
-                return null;
-              }
-              const t = [];
-              const c = [];
-              // Stooq CSV columns: Date,Open,High,Low,Close,Volume
-              for (const row of lines.slice(1)) {
-                const cols = row.split(',');
-                const date = cols[0];
-                const closeNum = Number(cols[4]);
-                if (!date || !Number.isFinite(closeNum)) continue;
-                // Parse YYYY-MM-DD date string directly to avoid timezone offsets
-                const [y, m, d] = date.split('-');
-                const ts = Date.UTC(Number(y), Number(m) - 1, Number(d)) / 1000;
-                t.push(ts);
-                c.push(closeNum);
-              }
-              return t.length ? { t, c } : null;
-            }
+            console.log('Loading existing data...');
+            const existing = loadExisting();
 
-            async function getYahooCandles(host = 'query1') {
-              const yahoo = await getJson(
-                `https://${host}.finance.yahoo.com/v8/finance/chart/CVX?period1=${from}&period2=${now}&interval=1d&events=history`
-              );
-              const result = yahoo?.chart?.result?.[0];
-              const ts = result?.timestamp;
-              const closes = result?.indicators?.quote?.[0]?.close;
-              if (!Array.isArray(ts) || !Array.isArray(closes)) return null;
-              const t = [];
-              const c = [];
-              for (let i = 0; i < ts.length; i++) {
-                const time = Number(ts[i]);
-                const closeNum = Number(closes[i]);
-                if (!Number.isFinite(time) || !Number.isFinite(closeNum)) continue;
-                t.push(time);
-                c.push(closeNum);
-              }
-              return t.length ? { t, c } : null;
-            }
+            console.log(`Existing rows: ${existing.length}`);
 
-            // Yahoo Finance v7 CSV download — a separate endpoint that sometimes
-            // succeeds when the v8 JSON API is blocked.
-            function parseYahooCsv(csv) {
-              const lines = csv.trim().split(/\r?\n/).filter(Boolean);
-              // Expected header: Date,Open,High,Low,Close,Adj Close,Volume
-              if (!lines.length || !/^Date,/i.test(lines[0].trim())) return null;
-              const t = [];
-              const c = [];
-              for (const row of lines.slice(1)) {
-                const cols = row.split(',');
-                const date = cols[0]; // YYYY-MM-DD
-                const closeNum = Number(cols[4]); // Close column
-                if (!date || !Number.isFinite(closeNum)) continue;
-                const [y, m, d] = date.split('-');
-                const ts = Date.UTC(Number(y), Number(m) - 1, Number(d)) / 1000;
-                if (!Number.isFinite(ts)) continue;
-                t.push(ts);
-                c.push(closeNum);
-              }
-              return t.length ? { t, c } : null;
-            }
+            console.log('Fetching latest CVX...');
+            const stock = await fetchCVX();
 
-            async function getYahooCsvCandles(host = 'query1') {
-              const csv = await getText(
-                `https://${host}.finance.yahoo.com/v7/finance/download/CVX?period1=${from}&period2=${now}&interval=1d&events=history`
-              );
-              return parseYahooCsv(csv);
-            }
+            console.log('Fetching latest FX...');
+            const fx = await fetchFX();
 
-            // Nasdaq.com public API — used by Nasdaq's own website, no key needed.
-            // Rows come back newest-first; we sort to chronological order.
-            function parseNasdaqJson(json) {
-              const rows = json?.data?.tradesTable?.rows;
-              if (!Array.isArray(rows) || !rows.length) return null;
-              const t = [];
-              const c = [];
-              for (const row of rows) {
-                const dateStr = row?.date; // MM/DD/YYYY
-                const closeStr = String(row?.close || '').replace(/[$,]/g, '');
-                const closeNum = Number(closeStr);
-                if (!dateStr || !Number.isFinite(closeNum)) continue;
-                const parts = dateStr.split('/');
-                if (parts.length !== 3) continue;
-                const [mo, dy, yr] = parts;
-                const ts = Date.UTC(Number(yr), Number(mo) - 1, Number(dy)) / 1000;
-                if (!Number.isFinite(ts)) continue;
-                t.push(ts);
-                c.push(closeNum);
-              }
-              if (!t.length) return null;
-              // Sort chronologically (Nasdaq returns newest-first)
-              const idx = t.map((_, i) => i).sort((a, b) => t[a] - t[b]);
-              return { t: idx.map(i => t[i]), c: idx.map(i => c[i]) };
-            }
-
-            async function getNasdaqCandles() {
-              const fromDate = new Date(from * 1000).toISOString().slice(0, 10);
-              const toDate   = new Date(now  * 1000).toISOString().slice(0, 10);
-              const url = `https://api.nasdaq.com/api/quote/CVX/historical?assetclass=stocks&fromdate=${fromDate}&limit=9999&todate=${toDate}&type=1`;
-              const data = await getText(url, {
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'en-US,en;q=0.9',
-              });
-              let json;
-              try {
-                json = JSON.parse(data);
-              } catch (e) {
-                throw new Error('Nasdaq JSON parse error: ' + data.slice(0, 200));
-              }
-              return parseNasdaqJson(json);
-            }
-
-            function getCachedCandles() {
-              try {
-                if (!fs.existsSync('data.json')) return null;
-                const parsed = JSON.parse(fs.readFileSync('data.json', 'utf8'));
-                if (!Array.isArray(parsed?.data)) return null;
-                const t = [];
-                const c = [];
-                for (const row of parsed.data) {
-                  const date = row?.date;
-                  const usd = Number(row?.usd);
-                  if (!date || !Number.isFinite(usd)) continue;
-                  const parts = String(date).split('-');
-                  if (parts.length !== 3) continue;
-                  const [y, m, d] = parts;
-                  const ts = Date.UTC(Number(y), Number(m) - 1, Number(d)) / 1000;
-                  if (!Number.isFinite(ts)) continue;
-                  t.push(ts);
-                  c.push(usd);
-                }
-                return t.length ? { t, c } : null;
-              } catch (e) {
-                console.warn(`Unable to read cached data.json (${e?.message || e})`);
-                return null;
-              }
-            }
-
-            // --- CVX historical candles from Stooq → Yahoo Finance ---
-            console.log('Fetching CVX historical candles...');
-            let stock = null;
-
-            try {
-              const csv = await getText('https://stooq.pl/q/d/l/?s=CVX.US&i=d');
-              stock = parseStooqCsv(csv);
-              if (stock) {
-                console.log(`Got ${stock.t.length} candles from Stooq`);
-              } else {
-                console.warn(`Stooq returned unusable CSV (first 100 chars: ${csv.slice(0, 100).replace(/\r?\n/g, ' ')}); trying Yahoo Finance`);
-              }
-            } catch (e) {
-              console.warn(`Stooq request failed (${e.message}); trying Yahoo Finance`);
-            }
-
-            if (!stock) {
-              try {
-                stock = await getYahooCandles('query1');
-                if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance (query1)`);
-              } catch (e) {
-                console.warn(`Yahoo Finance query1 failed (${e.message}); trying query2`);
-              }
-            }
-
-            if (!stock) {
-              try {
-                stock = await getYahooCandles('query2');
-                if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance (query2)`);
-              } catch (e) {
-                console.warn(`Yahoo Finance query2 failed (${e.message}); trying Yahoo Finance CSV (query1)`);
-              }
-            }
-
-            if (!stock) {
-              try {
-                stock = await getYahooCsvCandles('query1');
-                if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance CSV (query1)`);
-              } catch (e) {
-                console.warn(`Yahoo Finance CSV query1 failed (${e.message}); trying Yahoo Finance CSV (query2)`);
-              }
-            }
-
-            if (!stock) {
-              try {
-                stock = await getYahooCsvCandles('query2');
-                if (stock) console.log(`Got ${stock.t.length} candles from Yahoo Finance CSV (query2)`);
-              } catch (e) {
-                console.warn(`Yahoo Finance CSV query2 failed (${e.message}); trying Nasdaq`);
-              }
-            }
-
-            if (!stock) {
-              try {
-                stock = await getNasdaqCandles();
-                if (stock) console.log(`Got ${stock.t.length} candles from Nasdaq`);
-              } catch (e) {
-                console.warn(`Nasdaq request failed (${e.message})`);
-              }
-            }
-
-            if (!stock) {
-              stock = getCachedCandles();
-              if (stock) {
-                console.log(`Using ${stock.t.length} cached candles from data.json`);
-              } else {
-                console.warn('No cached candles available in data.json');
-              }
-            }
-
-            if (!stock) throw new Error('No source returned CVX historical candle data');
-
-            // --- Finnhub current quote (free tier: /quote endpoint) ---
-            let finnhubQuote = null;
-            if (key) {
-              try {
-                const quote = await getJson(
-                  `https://finnhub.io/api/v1/quote?symbol=CVX&token=${key}`
-                );
-                // quote.c = current price, quote.t = timestamp (Unix seconds)
-                const price = Number(quote?.c);
-                const ts    = Number(quote?.t);
-                if (Number.isFinite(price) && price > 0 && Number.isFinite(ts) && ts > 0) {
-                  finnhubQuote = { price, ts };
-                  console.log(`Got current quote from Finnhub: $${price} at ${new Date(ts * 1000).toISOString()}`);
-                } else {
-                  console.warn('Finnhub quote response missing valid price/timestamp:', JSON.stringify(quote).slice(0, 200));
-                }
-              } catch (e) {
-                console.warn(`Finnhub quote request failed (${e.message}); skipping`);
-              }
-            } else {
-              console.warn('FINNHUB_KEY is not set; skipping Finnhub current quote');
-            }
-
-            // --- AUD/USD history from Frankfurter ---
-            console.log('Fetching AUD/USD rates...');
-            const today = new Date().toISOString().slice(0, 10);
-            const fx = await getJson(
-              `https://api.frankfurter.app/v1/1999-01-04..${today}?from=USD&to=AUD`
-            );
-            if (!fx.rates) throw new Error('Frankfurter error: no rates');
-            console.log(`Got ${Object.keys(fx.rates).length} FX dates`);
-
-            // --- Build merged data array ---
-            const fxDates = Object.keys(fx.rates).sort();
-
-            function nearestFX(isoDate) {
-              if (fx.rates[isoDate]) return fx.rates[isoDate].AUD;
-              const prev = fxDates.filter(d => d <= isoDate);
-              return prev.length ? fx.rates[prev[prev.length - 1]].AUD : null;
-            }
-
-            const merged = stock.t.map((ts, i) => {
-              const date    = new Date(ts * 1000).toISOString().slice(0, 10);
-              const usd     = stock.c[i];
-              const audPerUsd = nearestFX(date);
-              const aud     = audPerUsd ? usd * audPerUsd : null;
-              const fx_rate = audPerUsd ? 1 / audPerUsd : null;
-              return { date, usd, aud, fx: fx_rate };
-            }).filter(d => d.aud !== null && d.usd !== null);
-
-            // --- Upsert Finnhub current quote as today's record ---
-            if (finnhubQuote) {
-              const quoteDate = new Date(finnhubQuote.ts * 1000).toISOString().slice(0, 10);
-              const audPerUsd = nearestFX(quoteDate);
-              const aud       = audPerUsd ? finnhubQuote.price * audPerUsd : null;
-              const fx_rate   = audPerUsd ? 1 / audPerUsd : null;
-              const record    = { date: quoteDate, usd: finnhubQuote.price, aud, fx: fx_rate, source: 'finnhub' };
-              const idx = merged.findIndex(d => d.date === quoteDate);
-              if (idx >= 0) {
-                merged[idx] = record;
-                console.log(`Updated existing record for ${quoteDate} with Finnhub quote`);
-              } else {
-                merged.push(record);
-                merged.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
-                console.log(`Appended new record for ${quoteDate} from Finnhub quote`);
-              }
-            }
+            const merged = merge(existing, stock, fx);
 
             const output = {
               updated: new Date().toISOString(),
-              data: merged,
+              data: merged
             };
 
             fs.writeFileSync('data.json', JSON.stringify(output));
-            console.log(`Wrote ${merged.length} rows to data.json`);
+            console.log(`Total rows: ${merged.length}`);
           }
 
-          main().catch(e => { console.error(e); process.exit(1); });
+          main().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
           EOF
 
       - name: Commit data.json
