@@ -805,11 +805,7 @@
   function getEarliestAvailableDate() {
     if (earliestAvailableDate) return earliestAvailableDate;
     if (cachedRows && cachedRows.length > 0) {
-      const earliestTs = cachedRows.reduce((minTs, row) => {
-        const ts = row.date.getTime();
-        return ts < minTs ? ts : minTs;
-      }, Number.POSITIVE_INFINITY);
-      earliestAvailableDate = new Date(earliestTs);
+      earliestAvailableDate = new Date(cachedRows[0].date.getTime());
       return earliestAvailableDate;
     }
     return null;
@@ -1174,7 +1170,11 @@
         if (!earliest) {
           await loadAllData();
           earliest = getEarliestAvailableDate();
-          if (!earliest) return;
+          if (!earliest) {
+            el('errorMsg').textContent = 'Could not determine earliest available date.';
+            showError(true);
+            return;
+          }
         }
         rangeStart = new Date(earliest.getTime());
       } else {
