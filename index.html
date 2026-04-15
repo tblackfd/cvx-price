@@ -802,6 +802,14 @@
     el('endDate').value   = toISO(rangeEnd);
   }
 
+  function getEarliestAvailableDate() {
+    if (cachedRows && cachedRows.length > 0) {
+      const earliestTs = Math.min(...cachedRows.map(d => d.date.getTime()));
+      return new Date(earliestTs);
+    }
+    return new Date('1999-01-01');
+  }
+
   // Both datasets fetched once per session and filtered client-side —
   // switching range tabs never triggers another network request.
   // ── All data is pre-fetched server-side by a GitHub Action and stored
@@ -1155,8 +1163,7 @@
       rangeEnd = new Date();
       const key = btn.dataset.range;
       if (key === 'MAX') {
-        // Data goes back to 1999 (earliest Frankfurter FX data)
-        rangeStart = new Date('1999-01-04');
+        rangeStart = getEarliestAvailableDate();
       } else {
         rangeStart = new Date(Date.now() - PRESET_DAYS[key] * 86_400_000);
       }
