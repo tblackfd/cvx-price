@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Chevron (CVX) — Daily Price (USD)</title>
+  <title>Chevron (CVX) — Price in AUD</title>
   <style>
     /* ── Reset & base ─────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -636,9 +636,9 @@
   <!-- ── Hero ───────────────────────────────────────────────────── -->
   <div class="hero">
     <div class="hero__price-block">
-      <div class="hero__label">Latest Close (USD)</div>
+      <div class="hero__label">Latest Price in AUD</div>
       <div class="hero__price">
-        <span class="hero__currency">$</span><span id="heroPrice">—</span>
+        <span class="hero__currency">A$</span><span id="heroPrice">—</span>
       </div>
       <div class="hero__change" id="heroChange">
         <span class="hero__change-arrow" id="heroArrow"></span>
@@ -650,11 +650,11 @@
     <div class="hero__sub">
       <span class="pill">
         <span class="pill__dot"></span>
-        Open <span id="heroOpen">—</span>
+        USD <span id="heroOpen">—</span>
       </span>
       <span class="pill pill--accent">
         <span class="pill__dot"></span>
-        Day Range <span id="heroRange">—</span>
+        FX <span id="heroRange">—</span>
       </span>
       <span class="pill">
         <span class="pill__dot"></span>
@@ -701,15 +701,15 @@
     <div class="chart-tooltip" id="chartTooltip">
       <div class="tooltip-date" id="ttDate"></div>
       <div class="tooltip-row">
-        <span class="tooltip-label">Close</span>
+        <span class="tooltip-label">AUD</span>
         <span class="tooltip-value aud" id="ttClose"></span>
       </div>
       <div class="tooltip-row">
-        <span class="tooltip-label">Open</span>
+        <span class="tooltip-label">USD</span>
         <span class="tooltip-value usd" id="ttOpen"></span>
       </div>
       <div class="tooltip-row">
-        <span class="tooltip-label">High / Low</span>
+        <span class="tooltip-label">FX Rate</span>
         <span class="tooltip-value fx" id="ttRange"></span>
       </div>
       <div class="tooltip-row">
@@ -723,12 +723,12 @@
   <!-- ── Stats ───────────────────────────────────────────────────── -->
   <div class="stats-row">
     <div class="stat-card">
-      <div class="stat-label">Period High (USD)</div>
+      <div class="stat-label">Period High (AUD)</div>
       <div class="stat-value" id="statHigh">—</div>
       <div class="stat-sub" id="statHighDate"></div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Period Low (USD)</div>
+      <div class="stat-label">Period Low (AUD)</div>
       <div class="stat-value" id="statLow">—</div>
       <div class="stat-sub" id="statLowDate"></div>
     </div>
@@ -744,9 +744,20 @@
     </div>
   </div>
 
+  <!-- ── FX rate sub-chart ─────────────────────────────────────────── -->
+  <div class="fx-section">
+    <div class="section-header">
+      <span class="section-title">AUD / USD Exchange Rate</span>
+      <div class="section-line"></div>
+    </div>
+    <div class="fx-chart-wrapper">
+      <canvas id="fxChart"></canvas>
+    </div>
+  </div>
+
   <!-- ── Footer ─────────────────────────────────────────────────── -->
   <footer>
-    <span>Data: CVX daily CSV baseline (`cvx_us_d.csv`) with once-daily Stooq refresh via GitHub Actions.</span>
+    <span>Data: CVX daily OHLCV + AUD/USD FX via alphavantage.co, supplemented by <code>cvx_us_d.csv</code> and <code>DEXUSAL.csv</code> baselines, refreshed daily via GitHub Actions.</span>
     <span>Not financial advice. For informational purposes only.</span>
   </footer>
 
@@ -760,6 +771,8 @@
   const el = id => document.getElementById(id);
 
   const fmtUSD = n => n == null ? '—' : `$${n.toFixed(2)}`;
+  const fmtAUD = n => n == null ? '—' : `A$${n.toFixed(2)}`;
+  const fmtFX  = n => n == null ? '—' : n.toFixed(4);
   const fmtPct = n => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
   const fmtVol = n => n == null ? '—' : Math.round(n).toLocaleString('en-US');
   const fmtDate = d => d.toLocaleDateString('en-AU', {
@@ -779,6 +792,7 @@
   // ── State ─────────────────────────────────────────────────────────
   let allData     = [];
   let mainChart   = null;
+  let fxChart     = null;
 
   // Active date window — driven by preset tabs, MAX, or custom date inputs
   let rangeStart = new Date(Date.now() - 180 * 86_400_000); // default: 6M ago
@@ -832,13 +846,21 @@
         low: Number.isFinite(Number(d.low)) ? Number(d.low) : usdFallbackValue,
         close: Number.isFinite(Number(d.close)) ? Number(d.close) : usdFallbackValue,
         volume: Number.isFinite(Number(d.volume)) ? Number(d.volume) : 0,
+        // fx: AUD/USD rate (1 AUD = fx USD); legacy field name was also 'fx'
+        fx: Number.isFinite(Number(d.fx)) && Number(d.fx) > 0 ? Number(d.fx) : null,
+        // aud_close: legacy field was 'aud'
+        aud_close: Number.isFinite(Number(d.aud_close)) && Number(d.aud_close) > 0
+          ? Number(d.aud_close)
+          : (Number.isFinite(Number(d.aud)) && Number(d.aud) > 0 ? Number(d.aud) : null),
       };
     }).filter(d => (
       Number.isFinite(d.open) &&
       Number.isFinite(d.high) &&
       Number.isFinite(d.low) &&
       Number.isFinite(d.close) &&
-      Number.isFinite(d.volume)
+      Number.isFinite(d.volume) &&
+      d.fx != null &&
+      d.aud_close != null
     ));
     return { rows: cachedRows, updated: json.updated };
   }
@@ -858,6 +880,7 @@
       renderHero();
       renderStats();
       renderMainChart();
+      renderFxChart();
       const updatedDate = updated ? fmtDate(new Date(updated)) : fmtDate(new Date());
       el('lastUpdated').textContent = `Updated ${updatedDate}`;
 
@@ -875,13 +898,13 @@
     const first = allData[0];
     const last  = allData[allData.length - 1];
 
-    el('heroPrice').textContent = last.close.toFixed(2);
-    el('heroOpen').textContent  = fmtUSD(last.open);
-    el('heroRange').textContent = `${fmtUSD(last.high)} / ${fmtUSD(last.low)}`;
+    el('heroPrice').textContent  = last.aud_close.toFixed(2);
+    el('heroOpen').textContent   = fmtUSD(last.close);
+    el('heroRange').textContent  = fmtFX(last.fx);
     el('heroVolume').textContent = fmtVol(last.volume);
 
-    const change = last.close - first.close;
-    const pct    = (change / first.close) * 100;
+    const change = last.aud_close - first.aud_close;
+    const pct    = (change / first.aud_close) * 100;
     const pos    = change >= 0;
 
     el('heroChange').className    = `hero__change ${pos ? 'positive' : 'negative'}`;
@@ -892,20 +915,20 @@
 
   // ── Stats cards ───────────────────────────────────────────────────
   function renderStats() {
-    const closes = allData.map(d => d.close);
+    const audCloses = allData.map(d => d.aud_close);
     const vols = allData.map(d => d.volume);
 
-    const highVal = Math.max(...closes);
-    const lowVal  = Math.min(...closes);
-    const highIdx = closes.indexOf(highVal);
-    const lowIdx  = closes.indexOf(lowVal);
+    const highVal = Math.max(...audCloses);
+    const lowVal  = Math.min(...audCloses);
+    const highIdx = audCloses.indexOf(highVal);
+    const lowIdx  = audCloses.indexOf(lowVal);
 
-    el('statHigh').textContent     = fmtUSD(highVal);
+    el('statHigh').textContent     = fmtAUD(highVal);
     el('statHighDate').textContent = fmtDate(allData[highIdx].date);
-    el('statLow').textContent      = fmtUSD(lowVal);
+    el('statLow').textContent      = fmtAUD(lowVal);
     el('statLowDate').textContent  = fmtDate(allData[lowIdx].date);
 
-    const ret = ((closes.at(-1) - closes[0]) / closes[0]) * 100;
+    const ret = ((audCloses.at(-1) - audCloses[0]) / audCloses[0]) * 100;
     const avgVolume  = vols.reduce((a, b) => a + b, 0) / vols.length;
 
     const retEl = el('statReturn');
@@ -933,6 +956,57 @@
   const GRID  = 'rgba(48,54,61,0.6)';
   const MUTED = '#8b949e';
 
+  // ── FX mini-chart ─────────────────────────────────────────────────
+  function renderFxChart() {
+    const canvas = el('fxChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (fxChart) fxChart.destroy();
+
+    fxChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: allData.map(d => d.date),
+        datasets: [{
+          label: 'AUD/USD',
+          data: allData.map(d => d.fx),
+          borderColor: '#a5d6a7',
+          backgroundColor: 'transparent',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          tension: 0.3,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            enabled: true,
+            callbacks: { label: ctx => `AUD/USD: ${ctx.parsed.y.toFixed(4)}` }
+          },
+        },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: getTimeUnit() },
+            grid:   { color: GRID },
+            ticks:  { color: MUTED, maxTicksLimit: 8 },
+            border: { color: '#30363d' },
+          },
+          y: {
+            grid:   { color: GRID },
+            ticks:  { color: '#a5d6a7', callback: v => v.toFixed(3) },
+            border: { color: '#30363d' },
+          },
+        },
+        animation: { duration: 350 },
+      },
+    });
+  }
+
   // ── Main chart ────────────────────────────────────────────────────
   function renderMainChart() {
     const canvas = el('mainChart');
@@ -940,8 +1014,8 @@
     if (mainChart) mainChart.destroy();
 
     const datasets = [{
-      label: 'CVX Close (USD)',
-      data: allData.map(d => d.close),
+      label: 'CVX Close (AUD)',
+      data: allData.map(d => d.aud_close),
       borderColor: '#00c2ff',
       backgroundColor: gradient(ctx, '#00c2ff'),
       borderWidth: 2,
@@ -964,7 +1038,7 @@
       x: xScale,
       y: {
         grid:   { color: GRID },
-        ticks:  { color: '#00c2ff', callback: v => `$${v.toFixed(0)}` },
+        ticks:  { color: '#00c2ff', callback: v => `A$${v.toFixed(0)}` },
         border: { color: '#30363d' },
       }
     };
@@ -1016,10 +1090,10 @@
     if (!pts.length) { hideTooltip(); return; }
 
     const d = allData[pts[0].index];
-    el('ttDate').textContent = fmtDate(d.date);
-    el('ttClose').textContent  = fmtUSD(d.close);
-    el('ttOpen').textContent   = fmtUSD(d.open);
-    el('ttRange').textContent  = `${fmtUSD(d.high)} / ${fmtUSD(d.low)}`;
+    el('ttDate').textContent   = fmtDate(d.date);
+    el('ttClose').textContent  = fmtAUD(d.aud_close);
+    el('ttOpen').textContent   = fmtUSD(d.close);
+    el('ttRange').textContent  = fmtFX(d.fx);
     el('ttVolume').textContent = fmtVol(d.volume);
     tt.style.display = 'block';
 
@@ -1061,6 +1135,7 @@
     renderHero();
     renderStats();
     renderMainChart();
+    renderFxChart();
   }
 
   // ── Controls ──────────────────────────────────────────────────────

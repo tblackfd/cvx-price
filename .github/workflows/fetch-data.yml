@@ -2,7 +2,7 @@ name: Update CVX Data
 
 on:
   schedule:
-    - cron: '30 0 * * *' # daily at 00:30 UTC
+    - cron: '30 0 * * *' # daily at 00:30 UTC (after NYSE close + Alpha Vantage update)
   workflow_dispatch:
 
 jobs:
@@ -15,202 +15,282 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Merge baseline CSV with latest daily rows (Stooq)
+      - name: Fetch CVX + AUD/USD data and update baselines
+        env:
+          ALPHA_VANTAGE_KEY: ${{ secrets.ALPHA_VANTAGE_KEY }}
         run: |
           node - <<'EOF'
           const https = require('https');
           const fs = require('fs');
           const path = require('path');
 
-          const BASELINE_CSV = path.resolve('cvx_us_d.csv');
-          const OUTPUT_JSON = path.resolve('data.json');
-          const SYMBOL = 'cvx.us';
-          const HOSTS = ['https://stooq.com', 'https://stooq.pl'];
-          const REQUEST_TIMEOUT_MS = 30000;
-          const MAX_ATTEMPTS = 3;
-          const INITIAL_RETRY_DELAY_MS = 1000;
+          const BASELINE_CVX_CSV = path.resolve('cvx_us_d.csv');
+          const BASELINE_FX_CSV  = path.resolve('DEXUSAL.csv');
+          const OUTPUT_JSON      = path.resolve('data.json');
 
-          function sleep(ms) {
-            return new Promise(resolve => setTimeout(resolve, ms));
+          const API_KEY = process.env.ALPHA_VANTAGE_KEY;
+          if (!API_KEY) throw new Error('Missing ALPHA_VANTAGE_KEY secret');
+
+          const REQUEST_TIMEOUT_MS  = 30000;
+          const RETRY_ATTEMPTS      = 3;
+          const RETRY_BASE_DELAY_MS = 1500;
+          const RATE_LIMIT_PATTERN  = /rate limit|premium endpoint|free API requests|requests per day|requests per second|spreading out/i;
+          const TRANSIENT_PATTERN   = /econnreset|etimedout|eai_again|enotfound|socket hang up|network/i;
+
+          function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+          function redact(s)  { return String(s || '').replaceAll(API_KEY, '[REDACTED]'); }
+          function isObj(v)   { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+          function parseNum(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
+
+          function validDate(d) {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+            const p = new Date(`${d}T00:00:00Z`);
+            return !Number.isNaN(p.getTime()) && p.toISOString().slice(0, 10) === d;
           }
 
-          function csvEscape(value) {
-            const text = String(value ?? '');
-            if (/[",\n]/.test(text)) return `"${text.replaceAll('"', '""')}"`;
-            return text;
-          }
+          // ── CSV parsers ──────────────────────────────────────────────
 
-          function parseNumber(value) {
-            const n = Number(value);
-            return Number.isFinite(n) ? n : null;
-          }
-
-          function isValidDateString(date) {
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
-            const parsed = new Date(`${date}T00:00:00Z`);
-            if (Number.isNaN(parsed.getTime())) return false;
-            return parsed.toISOString().slice(0, 10) === date;
-          }
-
-          function parseCsv(text) {
-            const lines = text
-              .split(/\r?\n/)
-              .map(line => line.trim())
-              .filter(Boolean);
+          function parseCvxCsv(text) {
+            const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
             if (lines.length < 2) return [];
-
-            const header = lines[0].split(',');
-            const idx = {
-              date: header.indexOf('Date'),
-              open: header.indexOf('Open'),
-              high: header.indexOf('High'),
-              low: header.indexOf('Low'),
-              close: header.indexOf('Close'),
-              volume: header.indexOf('Volume')
+            const h = lines[0].split(',');
+            const i = {
+              date: h.indexOf('Date'), open: h.indexOf('Open'), high: h.indexOf('High'),
+              low: h.indexOf('Low'), close: h.indexOf('Close'), volume: h.indexOf('Volume')
             };
-
-            if (Object.values(idx).some(i => i < 0)) {
-              throw new Error('CSV is missing expected columns: Date,Open,High,Low,Close,Volume');
-            }
-
+            if (Object.values(i).some(x => x < 0)) throw new Error('cvx_us_d.csv missing required columns');
             const rows = [];
             for (const line of lines.slice(1)) {
-              const cols = line.split(',');
-              const date = cols[idx.date];
-              const open = parseNumber(cols[idx.open]);
-              const high = parseNumber(cols[idx.high]);
-              const low = parseNumber(cols[idx.low]);
-              const close = parseNumber(cols[idx.close]);
-              const volume = parseNumber(cols[idx.volume]);
-
-              if (!date || !isValidDateString(date)) continue;
+              const c = line.split(',');
+              const date = c[i.date];
+              const open = parseNum(c[i.open]), high = parseNum(c[i.high]);
+              const low = parseNum(c[i.low]), close = parseNum(c[i.close]);
+              const volume = parseNum(c[i.volume]);
+              if (!date || !validDate(date)) continue;
               if (![open, high, low, close].every(v => Number.isFinite(v) && v > 0)) continue;
               if (!Number.isFinite(volume) || volume <= 0) continue;
-
               rows.push({ date, open, high, low, close, volume });
             }
-
             return rows;
           }
 
-          function toCsv(rows) {
-            const header = 'Date,Open,High,Low,Close,Volume';
-            const body = rows.map(row => ([
-              row.date,
-              row.open,
-              row.high,
-              row.low,
-              row.close,
-              row.volume
-            ].map(csvEscape).join(',')));
-            return `${[header, ...body].join('\n')}\n`;
+          // Parses DEXUSAL.csv (FRED format: observation_date,DEXUSAL)
+          // Blank value rows (US holidays) are silently skipped.
+          function parseFxCsv(text) {
+            const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+            if (lines.length < 2) return [];
+            const rows = [];
+            for (const line of lines.slice(1)) {
+              const [rawDate, rawVal] = line.split(',');
+              const date = (rawDate || '').trim();
+              const val  = (rawVal  || '').trim();
+              if (!date || !validDate(date) || !val) continue;
+              const fx = parseNum(val);
+              if (!Number.isFinite(fx) || fx <= 0) continue;
+              rows.push({ date, fx });
+            }
+            return rows;
           }
 
-          function requestText(url) {
+          function toCvxCsv(rows) {
+            return 'Date,Open,High,Low,Close,Volume\n' +
+              rows.map(r => `${r.date},${r.open},${r.high},${r.low},${r.close},${r.volume}`).join('\n') + '\n';
+          }
+
+          function toFxCsv(rows) {
+            return 'observation_date,DEXUSAL\n' +
+              rows.map(r => `${r.date},${r.fx}`).join('\n') + '\n';
+          }
+
+          // ── Alpha Vantage JSON fetch ──────────────────────────────────
+
+          function getJson(url) {
             return new Promise((resolve, reject) => {
-              const req = https.get(url, {
-                headers: {
-                  'User-Agent': 'cvx-price-updater/1.0',
-                  'Accept': 'text/csv,*/*;q=0.8'
-                }
-              }, res => {
-                let raw = '';
-                res.on('data', chunk => { raw += chunk; });
+              const req = https.get(url, res => {
+                let data = '';
+                res.on('data', c => data += c);
                 res.on('end', () => {
                   if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-                    reject(new Error(`HTTP ${res.statusCode || 'unknown'}`));
+                    return reject(new Error(`HTTP ${res.statusCode}`));
+                  }
+                  let parsed;
+                  try { parsed = JSON.parse(data); } catch (e) {
+                    reject(new Error(`JSON parse error: ${redact(e.message)}. Preview: ${redact(data.slice(0, 120))}`));
                     return;
                   }
-                  resolve(raw);
+                  const details = redact([parsed['Error Message'], parsed['Information'], parsed['Note']].filter(Boolean).join(' | '));
+                  if (details) {
+                    const err = new Error(`API error: ${details}`);
+                    err.code = RATE_LIMIT_PATTERN.test(details) ? 'ALPHA_VANTAGE_RATE_LIMIT' : 'ALPHA_VANTAGE_API_ERROR';
+                    return reject(err);
+                  }
+                  resolve(parsed);
                 });
               });
               req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error('Request timeout')));
-              req.on('error', reject);
+              req.on('error', e => {
+                const err = new Error(`Network error: ${redact(e.message)}`);
+                err.code = TRANSIENT_PATTERN.test(String(e.message)) ? 'ALPHA_VANTAGE_TRANSIENT_NETWORK' : 'ALPHA_VANTAGE_NETWORK_ERROR';
+                reject(err);
+              });
             });
           }
 
-          async function fetchLatestRows() {
-            let lastError = null;
-            for (const host of HOSTS) {
-              const url = `${host}/q/d/l/?s=${SYMBOL}&i=d`;
-              try {
-                for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-                  try {
-                    const text = await requestText(url);
-                    const rows = parseCsv(text);
-                    if (rows.length === 0) throw new Error('No valid rows returned');
-                    return { rows, url };
-                  } catch (err) {
-                    lastError = err;
-                    if (attempt < MAX_ATTEMPTS) await sleep(INITIAL_RETRY_DELAY_MS * (2 ** (attempt - 1)));
-                  }
-                }
-              } catch (err) {
-                lastError = err;
+          function isRetryable(e) {
+            return e?.code === 'ALPHA_VANTAGE_RATE_LIMIT' || e?.code === 'ALPHA_VANTAGE_TRANSIENT_NETWORK';
+          }
+
+          async function withRetry(label, fn) {
+            let last;
+            for (let a = 1; a <= RETRY_ATTEMPTS; a++) {
+              try { return await fn(); } catch (e) {
+                last = e;
+                if (!isRetryable(e) || a === RETRY_ATTEMPTS) break;
+                const wait = RETRY_BASE_DELAY_MS * a;
+                console.warn(`${label} attempt ${a} failed (${e.message}). Retrying in ${wait}ms…`);
+                await sleep(wait);
               }
             }
-            throw new Error(`Failed to fetch latest rows from Stooq: ${lastError?.message || 'unknown error'}`);
+            throw last;
           }
+
+          // outputsize=compact gives last ~100 trading days — sufficient for daily
+          // incremental updates against the CSV baselines.
+          async function fetchCvxRows() {
+            const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
+            const json = await getJson(url);
+            const series = json['Time Series (Daily)'];
+            if (!isObj(series)) throw new Error(`Missing CVX time series${json['Information'] ? ': ' + redact(json['Information']) : ''}`);
+            return Object.entries(series).flatMap(([date, v]) => {
+              if (!isObj(v) || !validDate(date)) return [];
+              const adjClose = Number(v['5. adjusted close']);
+              const close    = Number.isFinite(adjClose) && adjClose > 0 ? adjClose : Number(v['4. close']);
+              const open = Number(v['1. open']), high = Number(v['2. high']);
+              const low  = Number(v['3. low']),  volume = Number(v['6. volume']);
+              if (![open, high, low, close].every(x => Number.isFinite(x) && x > 0)) return [];
+              if (!Number.isFinite(volume) || volume <= 0) return [];
+              return [{ date, open, high, low, close, volume }];
+            });
+          }
+
+          async function fetchFxRows() {
+            const url = `https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=AUD&to_symbol=USD&outputsize=compact&apikey=${API_KEY}`;
+            const json = await getJson(url);
+            const series = json['Time Series FX (Daily)'];
+            if (!isObj(series)) throw new Error(`Missing FX time series${json['Information'] ? ': ' + redact(json['Information']) : ''}`);
+            return Object.entries(series).flatMap(([date, v]) => {
+              if (!isObj(v) || !validDate(date)) return [];
+              const fx = Number(v['4. close']);
+              if (!Number.isFinite(fx) || fx <= 0) return [];
+              return [{ date, fx }];
+            });
+          }
+
+          // ── Merge + join helpers ──────────────────────────────────────
+
+          function mergeByDate(base, updates) {
+            const map = new Map(base.map(r => [r.date, r]));
+            for (const r of updates) map.set(r.date, r);
+            return Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
+          }
+
+          // Join CVX and FX on date.  For trading days where FX has no entry
+          // (e.g. US federal holidays on which AUD markets still traded), carry
+          // forward the most-recent prior FX close.
+          function buildOutput(cvxRows, fxRows) {
+            const fxMap   = new Map(fxRows.map(r => [r.date, r.fx]));
+            const fxDates = fxRows.map(r => r.date); // ascending
+
+            function lookupFx(date) {
+              if (fxMap.has(date)) return fxMap.get(date);
+              let lo = 0, hi = fxDates.length - 1, match = null;
+              while (lo <= hi) {
+                const mid = lo + Math.floor((hi - lo) / 2);
+                if (fxDates[mid] <= date) { match = fxDates[mid]; lo = mid + 1; }
+                else { hi = mid - 1; }
+              }
+              return match ? fxMap.get(match) : null;
+            }
+
+            const result = [];
+            for (const row of cvxRows) {
+              const fx = lookupFx(row.date);
+              if (fx == null) continue; // no FX coverage yet (pre-1999 dates)
+              result.push({
+                date: row.date,
+                open: row.open, high: row.high, low: row.low,
+                close: row.close, volume: row.volume,
+                fx,
+                aud_close: row.close / fx
+              });
+            }
+            return result;
+          }
+
+          // ── Main ──────────────────────────────────────────────────────
 
           async function main() {
-            if (!fs.existsSync(BASELINE_CSV)) {
-              throw new Error('Missing baseline file cvx_us_d.csv');
-            }
+            if (!fs.existsSync(BASELINE_CVX_CSV)) throw new Error('Missing cvx_us_d.csv');
+            if (!fs.existsSync(BASELINE_FX_CSV))  throw new Error('Missing DEXUSAL.csv');
 
-            const baselineRows = parseCsv(fs.readFileSync(BASELINE_CSV, 'utf8'));
-            if (baselineRows.length === 0) {
-              throw new Error('Baseline CSV has no valid rows');
-            }
+            const baseCvx = parseCvxCsv(fs.readFileSync(BASELINE_CVX_CSV, 'utf8'));
+            const baseFx  = parseFxCsv(fs.readFileSync(BASELINE_FX_CSV,  'utf8'));
+            console.log(`Baseline CVX: ${baseCvx.length} rows, FX: ${baseFx.length} rows`);
 
-            console.log(`Baseline rows: ${baselineRows.length}`);
-
-            let latestRows = [];
-            let sourceUrl = null;
+            let newCvx = [], newFx = [];
             try {
-              const fetched = await fetchLatestRows();
-              latestRows = fetched.rows;
-              sourceUrl = fetched.url;
-              console.log(`Fetched latest rows: ${latestRows.length} (${sourceUrl})`);
+              newCvx = await withRetry('CVX', fetchCvxRows);
+              console.log(`Fetched ${newCvx.length} CVX rows from Alpha Vantage`);
+              await sleep(12000); // 12s gap — AV free tier: max 5 calls/min
+              newFx = await withRetry('FX', fetchFxRows);
+              console.log(`Fetched ${newFx.length} FX rows from Alpha Vantage`);
             } catch (err) {
-              console.warn(`Latest fetch failed, keeping baseline data only: ${err.message}`);
+              if (isRetryable(err)) {
+                if (baseCvx.length === 0 || baseFx.length === 0) {
+                  throw new Error(`Alpha Vantage issue with empty baseline data: ${err.message}`);
+                }
+                console.warn(`Alpha Vantage issue, keeping baseline data: ${err.message}`);
+              } else {
+                throw err;
+              }
             }
 
-            const map = new Map();
-            for (const row of baselineRows) map.set(row.date, row);
-            for (const row of latestRows) map.set(row.date, row);
+            const mergedCvx = mergeByDate(baseCvx, newCvx);
+            const mergedFx  = mergeByDate(baseFx,  newFx);
+            console.log(`Merged CVX: ${mergedCvx.length} rows, FX: ${mergedFx.length} rows`);
 
-            const merged = Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
-            if (merged.length === 0) throw new Error('No rows available after merge');
+            fs.writeFileSync(BASELINE_CVX_CSV, toCvxCsv(mergedCvx), 'utf8');
+            fs.writeFileSync(BASELINE_FX_CSV,  toFxCsv(mergedFx),  'utf8');
 
-            fs.writeFileSync(BASELINE_CSV, toCsv(merged), 'utf8');
+            const data = buildOutput(mergedCvx, mergedFx);
+            if (data.length === 0) throw new Error('No output rows after joining CVX and FX data');
 
-            const payload = {
+            const first = data[0], last = data[data.length - 1];
+            console.log(`Output: ${data.length} rows, range: ${first.date} → ${last.date}`);
+            console.log(`Latest: close=${last.close} USD, fx=${last.fx} AUD/USD, aud_close=${last.aud_close.toFixed(2)} AUD`);
+
+            fs.writeFileSync(OUTPUT_JSON, JSON.stringify({
               updated: new Date().toISOString(),
               source: {
-                provider: 'stooq',
-                symbol: SYMBOL.toUpperCase(),
-                url: sourceUrl || 'baseline-only',
+                provider: 'alphavantage',
+                cvx_symbol: 'CVX',
+                fx_pair: 'AUD/USD',
                 schedule: 'daily',
-                baseline: 'cvx_us_d.csv'
+                baseline_cvx: 'cvx_us_d.csv',
+                baseline_fx: 'DEXUSAL.csv'
               },
-              data: merged
-            };
-
-            fs.writeFileSync(OUTPUT_JSON, JSON.stringify(payload), 'utf8');
-            console.log(`Merged rows: ${merged.length}`);
-            console.log(`Date range: ${merged[0].date} -> ${merged[merged.length - 1].date}`);
+              data
+            }), 'utf8');
+            console.log('data.json written');
           }
 
-          main().catch(err => {
-            console.error(err);
-            process.exit(1);
-          });
+          main().catch(err => { console.error(err); process.exit(1); });
           EOF
 
       - name: Commit updated data files
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add cvx_us_d.csv data.json
+          git add cvx_us_d.csv DEXUSAL.csv data.json
           git diff --staged --quiet || git commit -m "chore: update CVX data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push
