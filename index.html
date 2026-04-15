@@ -1369,7 +1369,10 @@
       document.querySelectorAll('.option-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       currentView = btn.dataset.view;
-      if (allData.length) renderMainChart();
+      if (allData.length) {
+        renderMainChart();
+        renderVolumeChart();
+      }
     });
   });
 
