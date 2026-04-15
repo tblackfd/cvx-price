@@ -1,76 +1,149 @@
-name: Download CVX full daily history (Stooq)
+name: One-off download - CVX daily history (Stooq -> JSON)
 
 on:
   workflow_dispatch:
+    inputs:
+      symbol:
+        description: "Stooq symbol (US equities typically end with .US, e.g. CVX.US)"
+        required: false
+        default: "CVX.US"
+      out_name:
+        description: "Output JSON file name"
+        required: false
+        default: "CVX_daily_history_stooq.json"
 
 jobs:
   download:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout (optional; not strictly needed for artifact-only)
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Download CVX daily history from Stooq and save JSON
+      - name: Download from Stooq and build JSON (inline Python)
+        env:
+          STOOQ_SYMBOL: ${{ inputs.symbol }}
+          OUT_NAME: ${{ inputs.out_name }}
         run: |
           python - <<'PY'
-          import csv, json
+          import csv
+          import json
+          import sys
+          import time
           from datetime import datetime, timezone
-          from urllib.request import urlopen
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+          from urllib.error import URLError, HTTPError
 
-          # Stooq US ticker format uses .US suffix; Chevron is CVX.US [2](https://community.home-assistant.io/t/alpha-vantage-no-longer-updating/450763)
-          symbol = "cvx.us"
-          url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"  # Stooq CSV download [3](https://glama.ai/mcp/servers/@calvernaz/alphavantage/tools/time_series_daily_adjusted)
+          SYMBOL = (sys.environ.get("STOOQ_SYMBOL") if hasattr(sys, "environ") else None) or None
+          # GitHub runner doesn't expose sys.environ; use os.environ instead
+          import os
+          SYMBOL = os.environ.get("STOOQ_SYMBOL", "CVX.US").strip()
+          OUT_NAME = os.environ.get("OUT_NAME", "CVX_daily_history_stooq.json").strip()
 
-          with urlopen(url, timeout=60) as r:
-            text = r.read().decode("utf-8", errors="replace")
+          # Stooq ticker convention: US stocks typically use .US suffix, e.g., CVX.US for Chevron. [2](https://community.home-assistant.io/t/alpha-vantage-no-longer-updating/450763)
+          stooq_symbol = SYMBOL.lower()
 
-          lines = text.strip().splitlines()
+          # Stooq CSV download endpoint used by common tooling. [1](https://glama.ai/mcp/servers/@calvernaz/alphavantage/tools/time_series_daily_adjusted)
+          # We'll try stooq.com first, then stooq.pl as a fallback host.
+          hosts = ["https://stooq.com", "https://stooq.pl"]
+          path = "/q/d/l/"
+          params = {"s": stooq_symbol, "i": "d"}  # daily only
+          query = urlencode(params)
+
+          def fetch_csv(url, attempts=5, base_sleep=2):
+            last_err = None
+            for i in range(1, attempts + 1):
+              try:
+                req = Request(
+                  url,
+                  headers={
+                    "User-Agent": "github-actions-stooq-downloader/1.0",
+                    "Accept": "text/csv,*/*;q=0.9",
+                  },
+                )
+                with urlopen(req, timeout=60) as r:
+                  data = r.read().decode("utf-8", errors="replace")
+                return data
+              except (HTTPError, URLError, TimeoutError) as e:
+                last_err = e
+                time.sleep(base_sleep * i)
+            raise RuntimeError(f"Failed to fetch after {attempts} attempts: {last_err}")
+
+          csv_text = None
+          used_url = None
+          for host in hosts:
+            url = f"{host}{path}?{query}"
+            try:
+              csv_text = fetch_csv(url)
+              used_url = url
+              break
+            except Exception as e:
+              print(f"WARN: fetch failed from {url}: {e}", file=sys.stderr)
+
+          if not csv_text:
+            raise RuntimeError("Unable to download CSV from any Stooq host.")
+
+          lines = csv_text.strip().splitlines()
+          # Expected Stooq CSV header format: Date,Open,High,Low,Close,Volume
           if not lines or not lines[0].lower().startswith("date,open,high,low,close,volume"):
-            raise RuntimeError("Unexpected Stooq response: " + text[:200])
+            raise RuntimeError("Unexpected Stooq response (first 300 chars):\n" + csv_text[:300])
 
           reader = csv.DictReader(lines)
           prices = []
           for row in reader:
+            # Convert types safely
+            def f(x):
+              return float(x) if x not in (None, "", "null") else None
+            def i(x):
+              return int(float(x)) if x not in (None, "", "null") else None
+
             prices.append({
               "date": row["Date"],
-              "open": float(row["Open"]),
-              "high": float(row["High"]),
-              "low": float(row["Low"]),
-              "close": float(row["Close"]),
-              "volume": int(float(row["Volume"])),
+              "open": f(row.get("Open")),
+              "high": f(row.get("High")),
+              "low": f(row.get("Low")),
+              "close": f(row.get("Close")),
+              "volume": i(row.get("Volume")),
             })
 
           prices.sort(key=lambda x: x["date"])
 
           payload = {
             "meta": {
-              "source": "stooq.com",
-              "symbol": "CVX",
-              "stooq_symbol": "CVX.US",
+              "source": "stooq",
+              "source_url": used_url,
+              "symbol": SYMBOL.split(".")[0].upper(),
+              "stooq_symbol": SYMBOL.upper(),
               "frequency": "daily",
               "downloaded_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "record_count": len(prices),
               "date_range": {
                 "start": prices[0]["date"] if prices else None,
-                "end": prices[-1]["date"] if prices else None
-              }
+                "end": prices[-1]["date"] if prices else None,
+              },
+              "schema": "date,open,high,low,close,volume",
             },
             "prices": prices
           }
 
-          out = "CVX_daily_history_stooq.json"
-          with open(out, "w", encoding="utf-8") as f:
+          with open(OUT_NAME, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
-          print(f"Wrote {out} with {len(prices)} rows.")
+          print(f"Saved {OUT_NAME}")
+          print(f"Records: {len(prices)}")
+          if prices:
+            print(f"Range: {prices[0]['date']} -> {prices[-1]['date']}")
           PY
 
-      - name: Upload JSON artifact
+      - name: Upload JSON as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CVX_daily_history_stooq
-          path: CVX_daily_history_stooq.json
+          name: cvx-daily-history-stooq
+          path: ${{ inputs.out_name }}
           if-no-files-found: error
