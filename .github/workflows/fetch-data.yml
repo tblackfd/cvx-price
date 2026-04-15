@@ -82,6 +82,8 @@ jobs:
           PAYABLE_COL = 2
           AMOUNT_COL = 3
           TYPE_COL = 4
+          if df.shape[1] <= AMOUNT_COL:
+              raise RuntimeError(f"Unexpected dividend table shape: {df.shape}")
 
           amount_re = re.compile(r"\$?\s*\d+(\.\d+)?")
           date_re = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
@@ -109,7 +111,7 @@ jobs:
                   str(latest.iloc[AMOUNT_COL]).replace("$", "").strip()
               ),
               "currency": "USD",
-              "type": latest.iloc[TYPE_COL] if TYPE_COL < len(latest) else None,
+              "type": latest.iloc[TYPE_COL] if df.shape[1] > TYPE_COL else None,
               "source": {
                   "url": SOURCE_URL,
                   "scraped_utc": scraped_utc,
