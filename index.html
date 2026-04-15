@@ -1082,14 +1082,16 @@
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (volumeChart) volumeChart.destroy();
+    const volumeData = allData.filter(d => d.date >= rangeStart && d.date <= rangeEnd);
+    if (!volumeData.length) return;
 
     volumeChart = new Chart(ctx, {
       type: 'bar',
       data: {
-        labels: allData.map(d => d.date),
+        labels: volumeData.map(d => d.date),
         datasets: [{
           label: 'Daily Volume',
-          data: allData.map(d => d.volume),
+          data: volumeData.map(d => d.volume),
           backgroundColor: 'rgba(0, 194, 255, 0.35)',
           borderColor: 'rgba(0, 194, 255, 0.8)',
           borderWidth: 1,
