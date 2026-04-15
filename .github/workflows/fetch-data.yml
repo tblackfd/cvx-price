@@ -2,7 +2,7 @@ name: Update CVX Data
 
 on:
   schedule:
-    - cron: '30 0 * * *'
+    - cron: '30 0 * * *' # daily at 00:30 UTC
   workflow_dispatch:
 
 jobs:
@@ -43,6 +43,13 @@ jobs:
             return Number.isFinite(n) ? n : null;
           }
 
+          function isValidDateString(date) {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+            const parsed = new Date(`${date}T00:00:00Z`);
+            if (Number.isNaN(parsed.getTime())) return false;
+            return parsed.toISOString().slice(0, 10) === date;
+          }
+
           function parseCsv(text) {
             const lines = text
               .split(/\r?\n/)
@@ -74,9 +81,8 @@ jobs:
               const close = parseNumber(cols[idx.close]);
               const volume = parseNumber(cols[idx.volume]);
 
-              if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
-              if (![open, high, close].every(v => Number.isFinite(v) && v > 0)) continue;
-              if (!Number.isFinite(low) || low < 0) continue;
+              if (!date || !isValidDateString(date)) continue;
+              if (![open, high, low, close].every(v => Number.isFinite(v) && v > 0)) continue;
               if (!Number.isFinite(volume) || volume < 0) continue;
 
               rows.push({ date, open, high, low, close, volume });
@@ -134,7 +140,7 @@ jobs:
                     return { rows, url };
                   } catch (err) {
                     lastError = err;
-                    if (attempt < 3) await sleep(1000 * attempt);
+                    if (attempt < 3) await sleep(1000 * (2 ** (attempt - 1)));
                   }
                 }
               } catch (err) {
