@@ -1,220 +1,195 @@
-import os
-import re
-import io
-import json
-import time
-import hashlib
-from datetime import datetime, timezone
+- name: Test scrape latest CVX dividend
+  shell: bash
+  run: |
+    python - <<'PY'
+    import os
+    import re
+    import io
+    import json
+    import time
+    import hashlib
+    from datetime import datetime, timezone
 
-import requests
-import pandas as pd
+    import requests
+    import pandas as pd
 
-SOURCE_URL = os.environ["SOURCE_URL"]
-OUT_JSON = os.environ["OUT_JSON"]
-OUT_CSV = os.environ["OUT_CSV"]
+    SOURCE_URL = os.environ["SOURCE_URL"]
+    OUT_JSON = os.environ["OUT_JSON"]
+    OUT_CSV = os.environ["OUT_CSV"]
 
-# Chevron dividend history page contains a tabular dividend history with
-# Declared / Record / Payable / Amount / Type columns.
-# https://chevroncorp.gcs-web.com/stock-information/dividend-history
+    # ------------------------------------
+    # HTTP fetch with retries
+    # ------------------------------------
+    def fetch_with_retries(url, attempts=6, backoff=2.0):
+        headers = {
+            "User-Agent": "github-actions-cvx-dividend-scraper/1.0",
+            "Accept": (
+                "text/html,application/xhtml+xml,"
+                "application/xml;q=0.9,*/*;q=0.8"
+            ),
+        }
 
-def fetch_with_retries(url, attempts=5, backoff=2.0):
-    headers = {
-        "User-Agent": "github-actions-cvx-dividend-scraper/1.0",
-        "Accept": (
-            "text/html,application/xhtml+xml,"
-            "application/xml;q=0.9,*/*;q=0.8"
-        ),
-    }
+        last_exc = None
+        for i in range(1, attempts + 1):
+            try:
+                return requests.get(url, headers=headers, timeout=30)
+            except Exception as e:
+                last_exc = e
+                time.sleep(backoff * i)
 
-    last_exc = None
-    for i in range(1, attempts + 1):
-        try:
-            resp = requests.get(url, headers=headers, timeout=30)
-            return resp
-        except Exception as e:
-            last_exc = e
-            time.sleep(backoff * i)
+        raise RuntimeError(
+            f"Failed to fetch {url} after {attempts} attempts: {last_exc}"
+        )
 
-    raise RuntimeError(
-        f"Failed to fetch {url} after {attempts} attempts: {last_exc}"
-    )
+    resp = fetch_with_retries(SOURCE_URL)
+    status = resp.status_code
+    html = resp.text or ""
 
+    if status != 200 or len(html) < 500:
+        raise RuntimeError(
+            f"Unexpected HTTP status/content. status={status}, bytes={len(html)}"
+        )
 
-resp = fetch_with_retries(SOURCE_URL, attempts=6, backoff=2.0)
-status = resp.status_code
-html = resp.text or ""
+    html_sha256 = hashlib.sha256(
+        html.encode("utf-8", errors="ignore")
+    ).hexdigest()
 
-if status != 200 or len(html) < 500:
-    raise RuntimeError(
-        f"Unexpected HTTP status/content. status={status}, bytes={len(html)}"
-    )
+    scraped_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-html_sha256 = hashlib.sha256(
-    html.encode("utf-8", errors="ignore")
-).hexdigest()
+    # ------------------------------------
+    # Parse HTML tables (CRITICAL FIX HERE)
+    # ------------------------------------
+    try:
+        tables = pd.read_html(io.StringIO(html))
+    except Exception as e:
+        raise RuntimeError(f"pandas.read_html failed: {e}")
 
-scraped_utc = datetime.now(timezone.utc).strftime(
-    "%Y-%m-%dT%H:%M:%SZ"
-)
+    if not tables:
+        raise RuntimeError("No HTML tables found on the page.")
 
-# -------------------------
-# Parse HTML tables
-# -------------------------
-try:
-    tables = pd.read_html(io.StringIO(html))
-except Exception as e:
-    raise RuntimeError(f"pandas.read_html failed: {e}")
+    expected_cols = {"declared", "record", "payable", "amount", "type"}
+    target = None
 
-if not tables:
-    raise RuntimeError("No HTML tables found on the page.")
-
-# Heuristic: locate the dividend history table
-expected_cols = {"declared", "record", "payable", "amount", "type"}
-target = None
-
-for t in tables:
-    cols = [str(c).strip().lower() for c in t.columns]
-    if expected_cols.issubset(set(cols)):
-        target = t.copy()
-        break
-
-if target is None:
-    # Fallback: partial match
     for t in tables:
         cols = [str(c).strip().lower() for c in t.columns]
-        if (
-            any("declared" in c for c in cols)
-            and any("record" in c for c in cols)
-            and any("payable" in c for c in cols)
-        ):
+        if expected_cols.issubset(set(cols)):
             target = t.copy()
             break
 
-if target is None:
-    raise RuntimeError(
-        "Could not identify the dividend history table with expected columns."
-    )
+    if target is None:
+        for t in tables:
+            cols = [str(c).strip().lower() for c in t.columns]
+            if (
+                any("declared" in c for c in cols)
+                and any("record" in c for c in cols)
+                and any("payable" in c for c in cols)
+            ):
+                target = t.copy()
+                break
 
-# Normalize column names
-target.columns = [str(c).strip() for c in target.columns]
-
-colmap = {}
-for c in target.columns:
-    lc = c.strip().lower()
-    if lc == "declared":
-        colmap[c] = "declared"
-    elif lc == "record":
-        colmap[c] = "record"
-    elif lc == "payable":
-        colmap[c] = "payable"
-    elif lc == "amount":
-        colmap[c] = "amount"
-    elif lc == "type":
-        colmap[c] = "type"
-    else:
-        colmap[c] = (
-            "period" if "period" not in colmap.values() else lc
+    if target is None:
+        raise RuntimeError(
+            "Could not identify the dividend history table."
         )
 
-df = target.rename(columns=colmap)
+    target.columns = [str(c).strip() for c in target.columns]
 
-# Keep only relevant columns
-keep = [
-    c
-    for c in ["period", "declared", "record", "payable", "amount", "type"]
-    if c in df.columns
-]
-df = df[keep].copy()
+    colmap = {}
+    for c in target.columns:
+        lc = c.lower()
+        if lc == "declared":
+            colmap[c] = "declared"
+        elif lc == "record":
+            colmap[c] = "record"
+        elif lc == "payable":
+            colmap[c] = "payable"
+        elif lc == "amount":
+            colmap[c] = "amount"
+        elif lc == "type":
+            colmap[c] = "type"
+        else:
+            colmap[c] = "period" if "period" not in colmap.values() else lc
 
-# Drop fully empty rows
-df = df.dropna(how="all")
+    df = target.rename(columns=colmap)
 
-# Clean values
-for c in df.columns:
-    df[c] = df[c].astype(str).str.strip()
+    keep = [
+        c for c in
+        ["period", "declared", "record", "payable", "amount", "type"]
+        if c in df.columns
+    ]
+    df = df[keep].dropna(how="all")
 
-# -------------------------
-# Detect valid dividend rows
-# -------------------------
-amount_re = re.compile(r"^\$?\s*\d+(\.\d+)?$")
-date_re = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}$")
+    for c in df.columns:
+        df[c] = df[c].astype(str).str.strip()
 
-def normalize_amount(s):
-    s = s.replace("$", "").replace(",", "").strip()
-    return float(s)
+    # ------------------------------------
+    # Identify valid dividend rows
+    # ------------------------------------
+    amount_re = re.compile(r"^\$?\s*\d+(\.\d+)?$")
+    date_re = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}$")
 
-def parse_date(s):
-    ts = pd.to_datetime(s, errors="coerce")
-    return ts.date().isoformat() if ts is not pd.NaT else None
+    def normalize_amount(s):
+        return float(s.replace("$", "").replace(",", "").strip())
 
-candidates = []
+    def parse_date(s):
+        ts = pd.to_datetime(s, errors="coerce")
+        return ts.date().isoformat() if ts is not pd.NaT else None
 
-for _, r in df.iterrows():
-    amt = r.get("amount", "")
-    dec = r.get("declared", "")
-    amt_num_str = amt.replace("$", "").strip()
-
-    if amount_re.match(amt_num_str) and date_re.match(dec):
-        candidates.append(r)
-
-if not candidates:
-    # Relax fallback
+    candidates = []
     for _, r in df.iterrows():
         amt = r.get("amount", "")
         dec = r.get("declared", "")
-        if "$" in amt and date_re.match(dec):
+        amt_num = amt.replace("$", "").strip()
+        if amount_re.match(amt_num) and date_re.match(dec):
             candidates.append(r)
 
-if not candidates:
-    preview = df.head(20).to_string(index=False)
-    raise RuntimeError(
-        "No dividend rows detected. Parsed preview:\n" + preview
-    )
+    if not candidates:
+        for _, r in df.iterrows():
+            if "$" in r.get("amount", "") and date_re.match(r.get("declared", "")):
+                candidates.append(r)
 
-# Latest dividend is presented first on the page
-latest = candidates[0]
+    if not candidates:
+        raise RuntimeError(
+            "No dividend rows detected:\n" + df.head(20).to_string(index=False)
+        )
 
-latest_period = str(latest.get("period", "")).strip()
-latest_declared = str(latest.get("declared", "")).strip()
-latest_record = str(latest.get("record", "")).strip()
-latest_payable = str(latest.get("payable", "")).strip()
-latest_amount_raw = str(latest.get("amount", "")).strip()
-latest_type = str(latest.get("type", "")).strip()
+    # Latest dividend is first on the page
+    latest = candidates[0]
 
-amount_value = normalize_amount(latest_amount_raw)
+    out = {
+        "ticker": "CVX",
+        "period": latest.get("period", ""),
+        "declared_date": parse_date(latest.get("declared", "")),
+        "record_date": (
+            parse_date(latest.get("record", ""))
+            if date_re.match(latest.get("record", ""))
+            else None
+        ),
+        "payable_date": (
+            parse_date(latest.get("payable", ""))
+            if date_re.match(latest.get("payable", ""))
+            else None
+        ),
+        "amount_per_share": normalize_amount(latest.get("amount", "")),
+        "amount_currency": "USD",
+        "type": latest.get("type", ""),
+        "source": {
+            "url": SOURCE_URL,
+            "http_status": status,
+            "scraped_utc": scraped_utc,
+            "html_sha256": html_sha256,
+        },
+    }
 
-out = {
-    "ticker": "CVX",
-    "period": latest_period,
-    "declared_date": parse_date(latest_declared),
-    "record_date": (
-        parse_date(latest_record)
-        if date_re.match(latest_record)
-        else None
-    ),
-    "payable_date": (
-        parse_date(latest_payable)
-        if date_re.match(latest_payable)
-        else None
-    ),
-    "amount_per_share": amount_value,
-    "amount_currency": "USD",
-    "type": latest_type,
-    "source": {
-        "url": SOURCE_URL,
-        "http_status": status,
-        "scraped_utc": scraped_utc,
-        "html_sha256": html_sha256,
-    },
-}
+    # ------------------------------------
+    # Write outputs
+    # ------------------------------------
+    with open(OUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2)
 
-# -------------------------
-# Save artifacts
-# -------------------------
-with open(OUT_JSON, "w", encoding="utf-8") as f:
-    json.dump(out, f, indent=2)
+    df.to_csv(OUT_CSV, index=False)
 
-df.to_csv(OUT_CSV, index=False)
-
-print("Latest dividend extracted:")
-print(json.dumps(out, indent=2))
+    print("Latest dividend extracted:")
+    print(json.dumps(out, indent=2))
+    PY
+``
