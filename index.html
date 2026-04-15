@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Chevron (CVX) — Price in AUD</title>
+  <title>Chevron (CVX) — Daily Price (USD)</title>
   <style>
     /* ── Reset & base ─────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -636,9 +636,9 @@
   <!-- ── Hero ───────────────────────────────────────────────────── -->
   <div class="hero">
     <div class="hero__price-block">
-      <div class="hero__label">Latest Price in AUD</div>
+      <div class="hero__label">Latest Close (USD)</div>
       <div class="hero__price">
-        <span class="hero__currency">A$</span><span id="heroPrice">—</span>
+        <span class="hero__currency">$</span><span id="heroPrice">—</span>
       </div>
       <div class="hero__change" id="heroChange">
         <span class="hero__change-arrow" id="heroArrow"></span>
@@ -650,11 +650,15 @@
     <div class="hero__sub">
       <span class="pill">
         <span class="pill__dot"></span>
-        USD <span id="heroUSD">—</span>
+        Open <span id="heroOpen">—</span>
       </span>
       <span class="pill pill--accent">
         <span class="pill__dot"></span>
-        AUD/USD <span id="heroFX">—</span>
+        Day Range <span id="heroRange">—</span>
+      </span>
+      <span class="pill">
+        <span class="pill__dot"></span>
+        Volume <span id="heroVolume">—</span>
       </span>
     </div>
   </div>
@@ -671,11 +675,6 @@
       <button class="range-tab" data-range="MAX">MAX</button>
     </div>
 
-    <div class="chart-options">
-      <button class="option-btn active" data-view="aud">AUD</button>
-      <button class="option-btn" data-view="usd">USD</button>
-      <button class="option-btn" data-view="both">Both</button>
-    </div>
   </div>
 
   <!-- ── Date range bar ─────────────────────────────────────────── -->
@@ -691,27 +690,31 @@
   <div class="chart-wrapper" id="chartWrapper">
     <div class="loading-overlay" id="loadingOverlay">
       <div class="spinner"></div>
-      <div class="loading-text">Fetching price &amp; FX data…</div>
+      <div class="loading-text">Loading daily CVX data…</div>
     </div>
     <div class="error-state" id="errorState">
       <div class="error-icon">⚠️</div>
       <div class="error-title">Unable to load data</div>
-      <div class="error-msg" id="errorMsg">Could not retrieve Chevron or exchange rate data. Please try again.</div>
+      <div class="error-msg" id="errorMsg">Could not retrieve Chevron daily data. Please try again.</div>
       <button class="retry-btn" id="retryBtn">Retry</button>
     </div>
     <div class="chart-tooltip" id="chartTooltip">
       <div class="tooltip-date" id="ttDate"></div>
       <div class="tooltip-row">
-        <span class="tooltip-label">AUD</span>
-        <span class="tooltip-value aud" id="ttAud"></span>
+        <span class="tooltip-label">Close</span>
+        <span class="tooltip-value aud" id="ttClose"></span>
       </div>
       <div class="tooltip-row">
-        <span class="tooltip-label">USD</span>
-        <span class="tooltip-value usd" id="ttUsd"></span>
+        <span class="tooltip-label">Open</span>
+        <span class="tooltip-value usd" id="ttOpen"></span>
       </div>
       <div class="tooltip-row">
-        <span class="tooltip-label">AUD/USD</span>
-        <span class="tooltip-value fx" id="ttFx"></span>
+        <span class="tooltip-label">High / Low</span>
+        <span class="tooltip-value fx" id="ttRange"></span>
+      </div>
+      <div class="tooltip-row">
+        <span class="tooltip-label">Volume</span>
+        <span class="tooltip-value fx" id="ttVolume"></span>
       </div>
     </div>
     <canvas id="mainChart"></canvas>
@@ -720,46 +723,30 @@
   <!-- ── Stats ───────────────────────────────────────────────────── -->
   <div class="stats-row">
     <div class="stat-card">
-      <div class="stat-label">Period High (AUD)</div>
+      <div class="stat-label">Period High (USD)</div>
       <div class="stat-value" id="statHigh">—</div>
       <div class="stat-sub" id="statHighDate"></div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Period Low (AUD)</div>
+      <div class="stat-label">Period Low (USD)</div>
       <div class="stat-value" id="statLow">—</div>
       <div class="stat-sub" id="statLowDate"></div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Period Return (AUD)</div>
+      <div class="stat-label">Period Return (Close)</div>
       <div class="stat-value" id="statReturn">—</div>
       <div class="stat-sub">vs period open</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Avg FX Rate</div>
-      <div class="stat-value" id="statFx">—</div>
-      <div class="stat-sub">AUD/USD average</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">FX Impact</div>
-      <div class="stat-value" id="statFxImpact">—</div>
-      <div class="stat-sub">AUD vs USD return</div>
-    </div>
-  </div>
-
-  <!-- ── FX sub-chart ─────────────────────────────────────────────── -->
-  <div class="fx-section">
-    <div class="section-header">
-      <span class="section-title">AUD / USD Exchange Rate</span>
-      <div class="section-line"></div>
-    </div>
-    <div class="fx-chart-wrapper">
-      <canvas id="fxChart"></canvas>
+      <div class="stat-label">Average Volume</div>
+      <div class="stat-value" id="statVolume">—</div>
+      <div class="stat-sub">shares traded</div>
     </div>
   </div>
 
   <!-- ── Footer ─────────────────────────────────────────────────── -->
   <footer>
-    <span>Data: Alpha Vantage (CVX + AUD/USD daily history), fetched every 6 hours via GitHub Actions. Prices converted using contemporaneous daily rates.</span>
+    <span>Data: CVX daily CSV baseline (`cvx_us_d.csv`) with once-daily Stooq refresh via GitHub Actions.</span>
     <span>Not financial advice. For informational purposes only.</span>
   </footer>
 
@@ -772,12 +759,17 @@
   // ── Helpers ───────────────────────────────────────────────────────
   const el = id => document.getElementById(id);
 
-  const fmtAUD = n => n == null ? '—' : `A$${n.toFixed(2)}`;
   const fmtUSD = n => n == null ? '—' : `$${n.toFixed(2)}`;
   const fmtPct = n => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+  const fmtVol = n => n == null ? '—' : Math.round(n).toLocaleString('en-US');
   const fmtDate = d => d.toLocaleDateString('en-AU', {
     day: 'numeric', month: 'short', year: 'numeric'
   });
+
+  function parseIsoDateAsLocal(isoDate) {
+    const [year, month, day] = isoDate.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  }
 
   function toISO(d) {
     // YYYY-MM-DD in local time
@@ -785,10 +777,8 @@
   }
 
   // ── State ─────────────────────────────────────────────────────────
-  let currentView = 'aud';
   let allData     = [];
   let mainChart   = null;
-  let fxChart     = null;
 
   // Active date window — driven by preset tabs, MAX, or custom date inputs
   let rangeStart = new Date(Date.now() - 180 * 86_400_000); // default: 6M ago
@@ -812,13 +802,11 @@
     return null;
   }
 
-  // Both datasets fetched once per session and filtered client-side —
+  // Data fetched once per session and filtered client-side —
   // switching range tabs never triggers another network request.
-  // ── All data is pre-fetched server-side by a GitHub Action and stored
-  // in data.json. The browser just reads that file — no external API calls,
-  // no CORS issues, no API keys exposed.
+  // ── Data is prepared server-side by a GitHub Action and stored in data.json.
   //
-  // data.json shape: { updated: ISO string, data: [{ date, usd, aud, fx }] }
+  // data.json shape: { updated: ISO string, data: [{ date, open, high, low, close, volume }] }
 
   let cachedRows = null; // full dataset from data.json
   let earliestAvailableDate = null;
@@ -834,12 +822,24 @@
     if (!r.ok) throw new Error(`Could not load data.json: HTTP ${r.status}`);
     const json = await r.json();
     if (!json.data || json.data.length === 0) throw new Error('data.json is empty — please trigger the GitHub Action to populate it.');
-    cachedRows = json.data.map(d => ({
-      date: new Date(d.date),
-      usd:  d.usd,
-      aud:  d.aud,
-      fx:   d.fx,
-    }));
+    cachedRows = json.data.map(d => {
+      // legacy rows used { date, usd, aud, fx }; treat usd as close/open/high/low fallback
+      const usdFallbackValue = Number.isFinite(Number(d.usd)) ? Number(d.usd) : NaN;
+      return {
+        date: parseIsoDateAsLocal(d.date),
+        open: Number.isFinite(Number(d.open)) ? Number(d.open) : usdFallbackValue,
+        high: Number.isFinite(Number(d.high)) ? Number(d.high) : usdFallbackValue,
+        low: Number.isFinite(Number(d.low)) ? Number(d.low) : usdFallbackValue,
+        close: Number.isFinite(Number(d.close)) ? Number(d.close) : usdFallbackValue,
+        volume: Number.isFinite(Number(d.volume)) ? Number(d.volume) : 0,
+      };
+    }).filter(d => (
+      Number.isFinite(d.open) &&
+      Number.isFinite(d.high) &&
+      Number.isFinite(d.low) &&
+      Number.isFinite(d.close) &&
+      Number.isFinite(d.volume)
+    ));
     return { rows: cachedRows, updated: json.updated };
   }
 
@@ -858,7 +858,6 @@
       renderHero();
       renderStats();
       renderMainChart();
-      renderFXChart();
       const updatedDate = updated ? fmtDate(new Date(updated)) : fmtDate(new Date());
       el('lastUpdated').textContent = `Updated ${updatedDate}`;
 
@@ -876,50 +875,43 @@
     const first = allData[0];
     const last  = allData[allData.length - 1];
 
-    el('heroPrice').textContent = last.aud.toFixed(2);
-    el('heroUSD').textContent   = `$${last.usd.toFixed(2)}`;
-    el('heroFX').textContent    = last.fx.toFixed(4);
+    el('heroPrice').textContent = last.close.toFixed(2);
+    el('heroOpen').textContent  = fmtUSD(last.open);
+    el('heroRange').textContent = `${fmtUSD(last.high)} / ${fmtUSD(last.low)}`;
+    el('heroVolume').textContent = fmtVol(last.volume);
 
-    const change = last.aud - first.aud;
-    const pct    = (change / first.aud) * 100;
+    const change = last.close - first.close;
+    const pct    = (change / first.close) * 100;
     const pos    = change >= 0;
 
     el('heroChange').className    = `hero__change ${pos ? 'positive' : 'negative'}`;
     el('heroArrow').textContent   = pos ? '▲' : '▼';
-    el('heroChangeVal').textContent = `${pos ? '+' : ''}A$${change.toFixed(2)}`;
+    el('heroChangeVal').textContent = `${pos ? '+' : ''}$${change.toFixed(2)}`;
     el('heroPct').textContent     = `(${fmtPct(pct)})`;
   }
 
   // ── Stats cards ───────────────────────────────────────────────────
   function renderStats() {
-    const auds = allData.map(d => d.aud);
-    const usds = allData.map(d => d.usd);
-    const fxs  = allData.map(d => d.fx);
+    const closes = allData.map(d => d.close);
+    const vols = allData.map(d => d.volume);
 
-    const highVal = Math.max(...auds);
-    const lowVal  = Math.min(...auds);
-    const highIdx = auds.indexOf(highVal);
-    const lowIdx  = auds.indexOf(lowVal);
+    const highVal = Math.max(...closes);
+    const lowVal  = Math.min(...closes);
+    const highIdx = closes.indexOf(highVal);
+    const lowIdx  = closes.indexOf(lowVal);
 
-    el('statHigh').textContent     = fmtAUD(highVal);
+    el('statHigh').textContent     = fmtUSD(highVal);
     el('statHighDate').textContent = fmtDate(allData[highIdx].date);
-    el('statLow').textContent      = fmtAUD(lowVal);
+    el('statLow').textContent      = fmtUSD(lowVal);
     el('statLowDate').textContent  = fmtDate(allData[lowIdx].date);
 
-    const audRet = ((auds.at(-1) - auds[0]) / auds[0]) * 100;
-    const usdRet = ((usds.at(-1) - usds[0]) / usds[0]) * 100;
-    const fxImpact = audRet - usdRet;
-    const avgFx  = fxs.reduce((a, b) => a + b, 0) / fxs.length;
+    const ret = ((closes.at(-1) - closes[0]) / closes[0]) * 100;
+    const avgVolume  = vols.reduce((a, b) => a + b, 0) / vols.length;
 
     const retEl = el('statReturn');
-    retEl.textContent  = fmtPct(audRet);
-    retEl.style.color  = audRet >= 0 ? 'var(--positive)' : 'var(--negative)';
-
-    el('statFx').textContent = avgFx.toFixed(4);
-
-    const impEl = el('statFxImpact');
-    impEl.textContent = `${fxImpact >= 0 ? '+' : ''}${fxImpact.toFixed(2)} pp`;
-    impEl.style.color = fxImpact >= 0 ? 'var(--positive)' : 'var(--negative)';
+    retEl.textContent  = fmtPct(ret);
+    retEl.style.color  = ret >= 0 ? 'var(--positive)' : 'var(--negative)';
+    el('statVolume').textContent = fmtVol(avgVolume);
   }
 
   // ── Chart helpers ─────────────────────────────────────────────────
@@ -947,41 +939,18 @@
     const ctx    = canvas.getContext('2d');
     if (mainChart) mainChart.destroy();
 
-    const showAUD  = currentView !== 'usd';
-    const showUSD  = currentView !== 'aud';
-    const bothAxes = showAUD && showUSD;
-
-    const datasets = [];
-
-    if (showAUD) {
-      datasets.push({
-        label: 'CVX (AUD)',
-        data: allData.map(d => d.aud),
-        borderColor: '#00c2ff',
-        backgroundColor: gradient(ctx, '#00c2ff'),
-        borderWidth: 2,
-        pointRadius: 0,
-        pointHoverRadius: 5,
-        fill: !bothAxes,
-        tension: 0.3,
-        yAxisID: bothAxes ? 'yAUD' : 'y',
-      });
-    }
-
-    if (showUSD) {
-      datasets.push({
-        label: 'CVX (USD)',
-        data: allData.map(d => d.usd),
-        borderColor: '#f0a030',
-        backgroundColor: gradient(ctx, '#f0a030'),
-        borderWidth: 2,
-        pointRadius: 0,
-        pointHoverRadius: 5,
-        fill: !bothAxes,
-        tension: 0.3,
-        yAxisID: bothAxes ? 'yUSD' : 'y',
-      });
-    }
+    const datasets = [{
+      label: 'CVX Close (USD)',
+      data: allData.map(d => d.close),
+      borderColor: '#00c2ff',
+      backgroundColor: gradient(ctx, '#00c2ff'),
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 5,
+      fill: true,
+      tension: 0.3,
+      yAxisID: 'y',
+    }];
 
     const xScale = {
       type: 'time',
@@ -991,32 +960,14 @@
       border: { color: '#30363d' },
     };
 
-    let scales = { x: xScale };
-
-    if (bothAxes) {
-      scales.yAUD = {
-        type: 'linear', position: 'left',
+    const scales = {
+      x: xScale,
+      y: {
         grid:   { color: GRID },
-        ticks:  { color: '#00c2ff', callback: v => `A$${v.toFixed(0)}` },
+        ticks:  { color: '#00c2ff', callback: v => `$${v.toFixed(0)}` },
         border: { color: '#30363d' },
-      };
-      scales.yUSD = {
-        type: 'linear', position: 'right',
-        grid:   { drawOnChartArea: false },
-        ticks:  { color: '#f0a030', callback: v => `$${v.toFixed(0)}` },
-        border: { color: '#30363d' },
-      };
-    } else {
-      const isAUD = showAUD;
-      scales.y = {
-        grid:   { color: GRID },
-        ticks:  {
-          color: isAUD ? '#00c2ff' : '#f0a030',
-          callback: v => isAUD ? `A$${v.toFixed(0)}` : `$${v.toFixed(0)}`,
-        },
-        border: { color: '#30363d' },
-      };
-    }
+      }
+    };
 
     mainChart = new Chart(ctx, {
       type: 'line',
@@ -1066,9 +1017,10 @@
 
     const d = allData[pts[0].index];
     el('ttDate').textContent = fmtDate(d.date);
-    el('ttAud').textContent  = fmtAUD(d.aud);
-    el('ttUsd').textContent  = fmtUSD(d.usd);
-    el('ttFx').textContent   = d.fx.toFixed(4);
+    el('ttClose').textContent  = fmtUSD(d.close);
+    el('ttOpen').textContent   = fmtUSD(d.open);
+    el('ttRange').textContent  = `${fmtUSD(d.high)} / ${fmtUSD(d.low)}`;
+    el('ttVolume').textContent = fmtVol(d.volume);
     tt.style.display = 'block';
 
     const cx   = isTouch ? e.touches[0].clientX : e.clientX;
@@ -1084,49 +1036,6 @@
     if (top < 8) top = 8;
     tt.style.left = `${left}px`;
     tt.style.top  = `${top}px`;
-  }
-
-  // ── FX sub-chart ──────────────────────────────────────────────────
-  function renderFXChart() {
-    const ctx = el('fxChart').getContext('2d');
-    if (fxChart) fxChart.destroy();
-
-    fxChart = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels: allData.map(d => d.date),
-        datasets: [{
-          data: allData.map(d => d.fx),
-          borderColor: '#3fb950',
-          backgroundColor: 'rgba(63,185,80,0.08)',
-          borderWidth: 1.5,
-          pointRadius: 0,
-          fill: true,
-          tension: 0.3,
-        }],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false }, tooltip: { enabled: false } },
-        scales: {
-          x: {
-            type: 'time',
-            time: { unit: getTimeUnit() },
-            grid:   { color: 'rgba(48,54,61,0.4)' },
-            ticks:  { color: MUTED, maxTicksLimit: 6 },
-            border: { color: '#30363d' },
-          },
-          y: {
-            position: 'right',
-            grid:   { color: 'rgba(48,54,61,0.4)' },
-            ticks:  { color: '#3fb950', callback: v => v.toFixed(3) },
-            border: { color: '#30363d' },
-          },
-        },
-        animation: { duration: 350 },
-      },
-    });
   }
 
   // ── UI state helpers ──────────────────────────────────────────────
@@ -1152,7 +1061,6 @@
     renderHero();
     renderStats();
     renderMainChart();
-    renderFXChart();
   }
 
   // ── Controls ──────────────────────────────────────────────────────
@@ -1189,16 +1097,6 @@
         el('errorMsg').textContent = 'Failed to update date range. Please try again.';
         showError(true);
       }
-    });
-  });
-
-  // AUD / USD / Both view toggle
-  document.querySelectorAll('.option-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.option-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentView = btn.dataset.view;
-      if (allData.length) renderMainChart();
     });
   });
 
