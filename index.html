@@ -803,14 +803,16 @@
   }
 
   function getEarliestAvailableDate() {
+    if (earliestAvailableDate) return earliestAvailableDate;
     if (cachedRows && cachedRows.length > 0) {
       const earliestTs = cachedRows.reduce((minTs, row) => {
         const ts = row.date.getTime();
         return ts < minTs ? ts : minTs;
       }, Number.POSITIVE_INFINITY);
-      return new Date(earliestTs);
+      earliestAvailableDate = new Date(earliestTs);
+      return earliestAvailableDate;
     }
-    return new Date('1999-01-01');
+    return new Date('1999-01-04');
   }
 
   // Both datasets fetched once per session and filtered client-side —
@@ -822,9 +824,11 @@
   // data.json shape: { updated: ISO string, data: [{ date, usd, aud, fx }] }
 
   let cachedRows = null; // full dataset from data.json
+  let earliestAvailableDate = null;
 
   async function loadAllData(forceRefresh = false) {
     if (cachedRows && !forceRefresh) return { rows: cachedRows, updated: null };
+    earliestAvailableDate = null;
     const cacheBuster = forceRefresh ? `?t=${Date.now()}` : '';
     const r = await fetch(`data.json${cacheBuster}`, {
       cache: 'no-store',
@@ -839,6 +843,7 @@
       aud:  d.aud,
       fx:   d.fx,
     }));
+    earliestAvailableDate = getEarliestAvailableDate();
     return { rows: cachedRows, updated: json.updated };
   }
 
