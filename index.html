@@ -1162,7 +1162,7 @@
 
   // Preset range tabs (including MAX)
   document.querySelectorAll('.range-tab').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       document.querySelectorAll('.range-tab').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       el('applyRange').classList.remove('visible');
@@ -1170,12 +1170,13 @@
       rangeEnd = new Date();
       const key = btn.dataset.range;
       if (key === 'MAX') {
-        const earliest = getEarliestAvailableDate();
+        let earliest = getEarliestAvailableDate();
         if (!earliest) {
-          loadData();
-          return;
+          await loadData();
+          earliest = getEarliestAvailableDate();
+          if (!earliest) return;
         }
-        rangeStart = earliest;
+        rangeStart = new Date(earliest);
       } else {
         rangeStart = new Date(Date.now() - PRESET_DAYS[key] * 86_400_000);
       }
