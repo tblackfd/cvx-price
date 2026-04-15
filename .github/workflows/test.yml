@@ -1,107 +1,96 @@
-- name: Test scrape latest CVX dividend
-  shell: bash
-  run: |
-    cat > scrape_dividend.py <<'EOF'
-import os
-import re
-import io
-import json
-import time
-import hashlib
-from datetime import datetime, timezone
+name: CVX Dividend Test
 
-import requests
-import pandas as pd
+on:
+  workflow_dispatch:
 
-SOURCE_URL = os.environ["SOURCE_URL"]
-OUT_JSON = os.environ["OUT_JSON"]
-OUT_CSV = os.environ["OUT_CSV"]
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
 
-def fetch_with_retries(url, attempts=6, backoff=2.0):
-    headers = {
-        "User-Agent": "github-actions-cvx-dividend-scraper/1.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    last_exc = None
-    for i in range(1, attempts + 1):
-        try:
-            return requests.get(url, headers=headers, timeout=30)
-        except Exception as e:
-            last_exc = e
-            time.sleep(backoff * i)
-    raise RuntimeError(f"Failed to fetch {url}: {last_exc}")
+    env:
+      SOURCE_URL: https://chevroncorp.gcs-web.com/stock-information/dividend-history
+      OUT_JSON: cvx_latest_dividend.json
+      OUT_CSV: cvx_dividend_history.csv
 
-resp = fetch_with_retries(SOURCE_URL)
-status = resp.status_code
-html = resp.text or ""
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-if status != 200 or len(html) < 500:
-    raise RuntimeError(f"Unexpected HTTP status/content: {status}")
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-html_sha256 = hashlib.sha256(
-    html.encode("utf-8", errors="ignore")
-).hexdigest()
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests lxml
 
-scraped_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+      - name: Scrape latest CVX dividend
+        run: |
+          cat > scrape_dividend.py <<'EOF'
+          import os
+          import re
+          import io
+          import json
+          import time
+          import hashlib
+          from datetime import datetime, timezone
 
-tables = pd.read_html(io.StringIO(html))
-if not tables:
-    raise RuntimeError("No HTML tables found")
+          import requests
+          import pandas as pd
 
-expected = {"declared", "record", "payable", "amount", "type"}
-target = None
+          SOURCE_URL = os.environ["SOURCE_URL"]
+          OUT_JSON = os.environ["OUT_JSON"]
+          OUT_CSV = os.environ["OUT_CSV"]
 
-for t in tables:
-    cols = [str(c).lower().strip() for c in t.columns]
-    if expected.issubset(cols):
-        target = t.copy()
-        break
+          def fetch_with_retries(url, attempts=6, backoff=2.0):
+              headers = {
+                  "User-Agent": "github-actions-cvx-dividend-scraper/1.0",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              }
+              last_exc = None
+              for i in range(1, attempts + 1):
+                  try:
+                      return requests.get(url, headers=headers, timeout=30)
+                  except Exception as e:
+                      last_exc = e
+                      time.sleep(backoff * i)
+              raise RuntimeError(f"Failed to fetch {url}: {last_exc}")
 
-if target is None:
-    raise RuntimeError("Dividend table not found")
+          resp = fetch_with_retries(SOURCE_URL)
+          html = resp.text or ""
 
-target.columns = [str(c).strip().lower() for c in target.columns]
-df = target.dropna(how="all")
+          tables = pd.read_html(io.StringIO(html))
+          df = tables[0].dropna(how="all")
 
-amount_re = re.compile(r"\$?\s*\d+(\.\d+)?")
-date_re = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
+          amount_re = re.compile(r"\$?\s*\d+(\.\d+)?")
+          date_re = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
 
-def parse_date(s):
-    ts = pd.to_datetime(s, errors="coerce")
-    return ts.date().isoformat() if ts is not pd.NaT else None
+          rows = []
+          for _, r in df.iterrows():
+              if amount_re.match(str(r.iloc[3])) and date_re.match(str(r.iloc[0])):
+                  rows.append(r)
 
-rows = []
-for _, r in df.iterrows():
-    if amount_re.match(str(r.get("amount", ""))) and date_re.match(str(r.get("declared", ""))):
-        rows.append(r)
+          latest = rows[0]
 
-if not rows:
-    raise RuntimeError("No dividend rows detected")
+          out = {
+              "ticker": "CVX",
+              "declared_date": latest.iloc[0],
+              "record_date": latest.iloc[1],
+              "payable_date": latest.iloc[2],
+              "amount_per_share": float(
+                  str(latest.iloc[3]).replace("$", "").strip()
+              ),
+              "currency": "USD",
+          }
 
-latest = rows[0]
+          with open(OUT_JSON, "w") as f:
+              json.dump(out, f, indent=2)
 
-out = {
-    "ticker": "CVX",
-    "declared_date": parse_date(latest.get("declared")),
-    "record_date": parse_date(latest.get("record")),
-    "payable_date": parse_date(latest.get("payable")),
-    "amount_per_share": float(
-        str(latest.get("amount")).replace("$", "").strip()
-    ),
-    "currency": "USD",
-    "source": {
-        "url": SOURCE_URL,
-        "scraped_utc": scraped_utc,
-        "html_sha256": html_sha256,
-    },
-}
+          df.to_csv(OUT_CSV, index=False)
 
-with open(OUT_JSON, "w") as f:
-    json.dump(out, f, indent=2)
+          print(json.dumps(out, indent=2))
+          EOF
 
-df.to_csv(OUT_CSV, index=False)
-
-print(json.dumps(out, indent=2))
-EOF
-
-    python scrape_dividend.py
+          python scrape_dividend.py
