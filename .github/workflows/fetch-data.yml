@@ -28,7 +28,7 @@ jobs:
           const BASELINE_FX_CSV  = path.resolve('DEXUSAL.csv');
           const OUTPUT_JSON      = path.resolve('data.json');
           const CHEVRON_DIVIDEND_URL = 'https://www.chevron.com/investors/stock-and-dividend';
-          const HTTP_USER_AGENT = 'cvx-price-data-fetcher/1.0';
+          const HTTP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
           const API_KEY = process.env.ALPHA_VANTAGE_KEY;
           if (!API_KEY) throw new Error('Missing ALPHA_VANTAGE_KEY secret');
@@ -267,7 +267,13 @@ jobs:
           function getText(url, redirects = 0) {
             return new Promise((resolve, reject) => {
               if (redirects > 5) return reject(new Error('Too many redirects'));
-              const req = https.get(url, { headers: { 'User-Agent': HTTP_USER_AGENT, 'Accept': 'text/html,*/*;q=0.8' } }, res => {
+              const req = https.get(url, { headers: {
+                'User-Agent': HTTP_USER_AGENT,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.google.com/',
+                'Connection': 'keep-alive'
+              } }, res => {
                 if (!res.statusCode) return reject(new Error('Missing HTTP status code'));
                 if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                   const redirected = new URL(res.headers.location, url).toString();
@@ -275,8 +281,15 @@ jobs:
                   return resolve(getText(redirected, redirects + 1));
                 }
                 if (res.statusCode < 200 || res.statusCode >= 300) {
-                  res.resume();
-                  return reject(new Error(`HTTP ${res.statusCode}`));
+                  let body = '';
+                  res.on('data', c => { if (body.length < 300) body += c.toString(); });
+                  res.on('end', () => {
+                    const diagKeys = ['server', 'via', 'cf-ray', 'x-akamai-session-id', 'x-cache', 'set-cookie'];
+                    const diagHeaders = Object.fromEntries(diagKeys.map(h => [h, res.headers[h]]).filter(([, v]) => v !== undefined));
+                    console.warn(`getText ${res.statusCode} ${url} diag_headers=${JSON.stringify(diagHeaders)} body_preview=${body.slice(0, 200)}`);
+                    reject(new Error(`HTTP ${res.statusCode}`));
+                  });
+                  return;
                 }
                 let data = '';
                 res.on('data', c => data += c);
@@ -348,6 +361,42 @@ jobs:
             const parsed = parseChevronLatestDividend(html);
             if (!parsed) throw new Error('Could not parse latest dividend from Chevron page');
             return parsed;
+          }
+
+          async function fetchNasdaqDividend() {
+            const NASDAQ_CVX_URL = 'https://api.nasdaq.com/api/quote/CVX/dividends?assetclass=stocks';
+            const json = await new Promise((resolve, reject) => {
+              const req = https.get(NASDAQ_CVX_URL, { headers: {
+                'User-Agent': HTTP_USER_AGENT,
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.nasdaq.com/'
+              } }, res => {
+                let data = '';
+                res.on('data', c => data += c);
+                res.on('end', () => {
+                  if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+                    return reject(new Error(`HTTP ${res.statusCode}`));
+                  }
+                  try { resolve(JSON.parse(data)); } catch (e) {
+                    reject(new Error(`JSON parse error: ${e.message}`));
+                  }
+                });
+              });
+              req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error('Request timeout')));
+              req.on('error', e => reject(new Error(`Network error: ${e.message}`)));
+            });
+            const rows = json?.data?.dividends?.rows;
+            if (!Array.isArray(rows) || rows.length === 0) throw new Error('No NASDAQ dividend rows');
+            for (const row of rows) {
+              const amount = parseCurrency(row.amount);
+              const recordDate = normalizeDateToken(row.recordDate);
+              const paymentDate = normalizeDateToken(row.paymentDate);
+              if (!Number.isFinite(amount) || amount <= 0) continue;
+              if (!validDate(recordDate) || !validDate(paymentDate)) continue;
+              return { amount, record_date: recordDate, payment_date: paymentDate };
+            }
+            throw new Error('Could not parse NASDAQ dividend rows');
           }
 
           // ── Merge + join helpers ──────────────────────────────────────
@@ -435,11 +484,22 @@ jobs:
               latestDividend = await withRetry('CHEVRON_DIVIDEND', fetchLatestChevronDividend);
               console.log(`Latest Chevron dividend: $${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
             } catch (err) {
-              if (latestDividend) {
-                console.warn(`Chevron dividend fetch/parse issue, keeping previous latest_dividend metadata: ${err.message}`);
-              } else {
-                throw err;
+              console.warn(`Chevron dividend fetch/parse issue: ${err.message}. Trying NASDAQ fallback…`);
+              try {
+                latestDividend = await fetchNasdaqDividend();
+                console.log(`Dividend from NASDAQ fallback: $${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
+              } catch (err2) {
+                if (latestDividend) {
+                  console.warn(`NASDAQ fallback also failed (${err2.message}), keeping previous latest_dividend metadata`);
+                } else {
+                  console.warn(`All dividend sources failed (${err2.message}), setting latest_dividend to null`);
+                  latestDividend = null;
+                }
               }
+            }
+            if (latestDividend) {
+              const payDays = Math.floor((Date.now() - new Date(`${latestDividend.payment_date}T00:00:00Z`).getTime()) / 86400000);
+              if (payDays > 120) console.warn(`Dividend metadata may be stale: payment_date=${latestDividend.payment_date} is ${payDays} days old`);
             }
 
             const first = data[0], last = data[data.length - 1];
