@@ -876,7 +876,7 @@
   //
   // data.json shape: {
   //   updated: ISO string,
-  //   latest_dividend: { amount, record_date, payment_date } | null,
+  //   latest_dividend: { amount, record_date, payment_date, declared_date?, type? } | null,
   //   dividends: [{ amount, record_date, payment_date, ... }],
   //   data: [{ date, open, high, low, close, volume, fx, aud_close }]
   // }
@@ -894,7 +894,13 @@
     const recordDate = parseIsoDateAsLocal(raw.record_date);
     const paymentDate = parseIsoDateAsLocal(raw.payment_date);
     if (Number.isNaN(recordDate.getTime()) || Number.isNaN(paymentDate.getTime())) return null;
-    return { amount, recordDate, paymentDate };
+    const declaredDate = typeof raw.declared_date === 'string' ? parseIsoDateAsLocal(raw.declared_date) : null;
+    const type = typeof raw.type === 'string' && raw.type.trim() ? raw.type.trim() : null;
+    return {
+      amount, recordDate, paymentDate,
+      ...(declaredDate && !Number.isNaN(declaredDate.getTime()) ? { declaredDate } : {}),
+      ...(type ? { type } : {})
+    };
   }
   function parseDividendEvents(raw) {
     if (!Array.isArray(raw)) return [];
@@ -1030,13 +1036,21 @@
     impEl.style.color = fxImpact >= 0 ? 'var(--positive)' : 'var(--negative)';
 
     if (latestDividendMeta) {
-      el('statDividend').textContent = `${(latestDividendMeta.amount * 100).toFixed(1)}¢`;
-      el('statDividendDate').textContent = `Record ${fmtDate(latestDividendMeta.recordDate)} • Paid ${fmtDate(latestDividendMeta.paymentDate)}`;
+      el('statDividend').textContent = `${(latestDividendMeta.amount * 100).toFixed(1)}¢${latestDividendMeta.type ? ` (${latestDividendMeta.type})` : ''}`;
+      const parts = [];
+      if (latestDividendMeta.declaredDate) parts.push(`Declared ${fmtDate(latestDividendMeta.declaredDate)}`);
+      parts.push(`Record ${fmtDate(latestDividendMeta.recordDate)}`);
+      parts.push(`Paid ${fmtDate(latestDividendMeta.paymentDate)}`);
+      el('statDividendDate').textContent = parts.join(' • ');
     } else {
       const latestDividend = cachedDividends.length ? cachedDividends[cachedDividends.length - 1] : null;
       if (latestDividend) {
-        el('statDividend').textContent = `${(latestDividend.amount * 100).toFixed(1)}¢`;
-        el('statDividendDate').textContent = `Record ${fmtDate(latestDividend.recordDate)} • Paid ${fmtDate(latestDividend.paymentDate)}`;
+        el('statDividend').textContent = `${(latestDividend.amount * 100).toFixed(1)}¢${latestDividend.type ? ` (${latestDividend.type})` : ''}`;
+        const parts = [];
+        if (latestDividend.declaredDate) parts.push(`Declared ${fmtDate(latestDividend.declaredDate)}`);
+        parts.push(`Record ${fmtDate(latestDividend.recordDate)}`);
+        parts.push(`Paid ${fmtDate(latestDividend.paymentDate)}`);
+        el('statDividendDate').textContent = parts.join(' • ');
       } else {
         el('statDividend').textContent = '—';
         el('statDividendDate').textContent = 'No dividend data';
