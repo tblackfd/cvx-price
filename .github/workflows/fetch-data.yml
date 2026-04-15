@@ -135,7 +135,7 @@ jobs:
 
             const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=full&apikey=${API_KEY}`;
             const dailyJson = await getJson(dailyUrl);
-            const dailySeries = dailyJson['Time Series (Daily)'] || dailyJson['Time Series (Daily) Adjusted'];
+            const dailySeries = dailyJson['Time Series (Daily)'];
             if (!isPlainObject(dailySeries)) {
               const dailyInfo = dailyJson['Information'];
               throw new Error(
