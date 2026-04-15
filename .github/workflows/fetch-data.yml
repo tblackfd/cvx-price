@@ -74,7 +74,7 @@ jobs:
           scraped_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
           tables = pd.read_html(io.StringIO(html))
-          if not tables:
+          if len(tables) == 0:
               raise RuntimeError("No HTML tables found")
           df = tables[0].dropna(how="all")
           DECLARED_COL = 0
@@ -82,7 +82,8 @@ jobs:
           PAYABLE_COL = 2
           AMOUNT_COL = 3
           TYPE_COL = 4
-          if df.shape[1] <= AMOUNT_COL:
+          REQUIRED_COLS = AMOUNT_COL + 1
+          if df.shape[1] < REQUIRED_COLS:
               raise RuntimeError(f"Unexpected dividend table shape: {df.shape}")
 
           amount_re = re.compile(r"\$?\s*\d+(\.\d+)?")
