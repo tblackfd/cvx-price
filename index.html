@@ -823,12 +823,18 @@
     if (!json.data || json.data.length === 0) throw new Error('data.json is empty — please trigger the GitHub Action to populate it.');
     cachedRows = json.data.map(d => ({
       date: parseDateOnly(d.date),
-      open: Number(d.open),
-      high: Number(d.high),
-      low: Number(d.low),
-      close: Number(d.close),
-      volume: Number(d.volume),
-    }));
+      open: Number.isFinite(Number(d.open)) ? Number(d.open) : Number(d.usd),
+      high: Number.isFinite(Number(d.high)) ? Number(d.high) : Number(d.usd),
+      low: Number.isFinite(Number(d.low)) ? Number(d.low) : Number(d.usd),
+      close: Number.isFinite(Number(d.close)) ? Number(d.close) : Number(d.usd),
+      volume: Number.isFinite(Number(d.volume)) ? Number(d.volume) : 0,
+    })).filter(d => (
+      Number.isFinite(d.open) &&
+      Number.isFinite(d.high) &&
+      Number.isFinite(d.low) &&
+      Number.isFinite(d.close) &&
+      Number.isFinite(d.volume)
+    ));
     return { rows: cachedRows, updated: json.updated };
   }
 
