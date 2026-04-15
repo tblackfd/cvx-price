@@ -392,6 +392,24 @@
       height: 400px;
     }
 
+    /* ── Volume sub-chart ─────────────────────────────────────────── */
+    .volume-section {
+      margin: 1rem 2rem 0;
+    }
+
+    .volume-chart-wrapper {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    #volumeChart {
+      display: block;
+      width: 100%;
+      height: 140px;
+    }
+
     /* ── Stats row ────────────────────────────────────────────────── */
     .stats-row {
       display: grid;
@@ -604,7 +622,7 @@
     /* ── Responsive ───────────────────────────────────────────────── */
     @media (max-width: 640px) {
       .navbar { padding: 0 1rem; }
-      .hero, .controls, .date-range-bar, .chart-wrapper, .stats-row, .fx-section, footer {
+      .hero, .controls, .date-range-bar, .chart-wrapper, .volume-section, .stats-row, .fx-section, footer {
         margin-left: 1rem;
         margin-right: 1rem;
         padding-left: 0;
@@ -726,6 +744,17 @@
     <canvas id="mainChart"></canvas>
   </div>
 
+  <!-- ── Daily volume histogram ───────────────────────────────────── -->
+  <div class="volume-section">
+    <div class="section-header">
+      <span class="section-title">Daily Volume</span>
+      <div class="section-line"></div>
+    </div>
+    <div class="volume-chart-wrapper">
+      <canvas id="volumeChart"></canvas>
+    </div>
+  </div>
+
   <!-- ── Stats ───────────────────────────────────────────────────── -->
   <div class="stats-row">
     <div class="stat-card">
@@ -809,6 +838,7 @@
   let currentView = 'aud';
   let allData     = [];
   let mainChart   = null;
+  let volumeChart = null;
   let fxChart     = null;
 
   // Active date window — driven by preset tabs, MAX, or custom date inputs
@@ -901,6 +931,7 @@
       renderHero();
       renderStats();
       renderMainChart();
+      renderVolumeChart();
       renderFxChart();
       const updatedDate = updated ? fmtDate(new Date(updated)) : fmtDate(new Date());
       el('lastUpdated').textContent = `Updated ${updatedDate}`;
@@ -1037,6 +1068,59 @@
           y: {
             grid:   { color: GRID },
             ticks:  { color: '#a5d6a7', callback: v => v.toFixed(3) },
+            border: { color: '#30363d' },
+          },
+        },
+        animation: { duration: 350 },
+      },
+    });
+  }
+
+  // ── Volume histogram ──────────────────────────────────────────────
+  function renderVolumeChart() {
+    const canvas = el('volumeChart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (volumeChart) volumeChart.destroy();
+
+    volumeChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: allData.map(d => d.date),
+        datasets: [{
+          label: 'Daily Volume',
+          data: allData.map(d => d.volume),
+          backgroundColor: 'rgba(0, 194, 255, 0.35)',
+          borderColor: 'rgba(0, 194, 255, 0.8)',
+          borderWidth: 1,
+          borderRadius: 2,
+          barPercentage: 0.95,
+          categoryPercentage: 0.95,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            enabled: true,
+            callbacks: { label: ctx => `Volume: ${fmtVol(ctx.parsed.y)}` }
+          },
+        },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: getTimeUnit() },
+            grid:   { color: GRID },
+            ticks:  { color: MUTED, maxTicksLimit: 8 },
+            border: { color: '#30363d' },
+          },
+          y: {
+            beginAtZero: true,
+            grid:   { color: GRID },
+            ticks:  { color: '#00c2ff', callback: v => fmtVol(v) },
             border: { color: '#30363d' },
           },
         },
@@ -1216,6 +1300,7 @@
     renderHero();
     renderStats();
     renderMainChart();
+    renderVolumeChart();
     renderFxChart();
   }
 
