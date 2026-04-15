@@ -962,7 +962,7 @@
     el('statFx').textContent = avgFx.toFixed(4);
 
     const impEl = el('statFxImpact');
-    impEl.textContent = `${fxImpact >= 0 ? '+' : ''}${fxImpact.toFixed(2)} pp`;
+    impEl.textContent = `${fxImpact >= 0 ? '+' : ''}${fxImpact.toFixed(2)} percentage points`;
     impEl.style.color = fxImpact >= 0 ? 'var(--positive)' : 'var(--negative)';
 
     const latestDividend = [...(cachedRows || [])].reverse().find(d => Number.isFinite(d.dividend) && d.dividend > 0);

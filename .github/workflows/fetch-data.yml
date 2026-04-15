@@ -59,6 +59,7 @@ jobs:
               low: h.indexOf('Low'), close: h.indexOf('Close'), volume: h.indexOf('Volume'),
               dividend: h.indexOf('Dividend')
             };
+            // Dividend column is optional for backward compatibility with existing baseline CSV snapshots.
             if ([i.date, i.open, i.high, i.low, i.close, i.volume].some(x => x < 0)) {
               throw new Error('cvx_us_d.csv missing required columns');
             }
