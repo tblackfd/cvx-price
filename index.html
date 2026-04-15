@@ -806,7 +806,7 @@
     if (earliestAvailableDate) return earliestAvailableDate;
     if (cachedRows && cachedRows.length > 0) {
       // data.json is produced in ascending date order by the fetch workflow merge step
-      earliestAvailableDate = new Date(cachedRows[0].date.getTime());
+      earliestAvailableDate = new Date(cachedRows[0].date);
       return earliestAvailableDate;
     }
     return null;
@@ -1160,29 +1160,34 @@
   // Preset range tabs (including MAX)
   document.querySelectorAll('.range-tab').forEach(btn => {
     btn.addEventListener('click', async () => {
-      document.querySelectorAll('.range-tab').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      el('applyRange').classList.remove('visible');
+      try {
+        document.querySelectorAll('.range-tab').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        el('applyRange').classList.remove('visible');
 
-      rangeEnd = new Date();
-      const key = btn.dataset.range;
-      if (key === 'MAX') {
-        let earliest = getEarliestAvailableDate();
-        if (!earliest) {
-          await loadAllData();
-          earliest = getEarliestAvailableDate();
+        rangeEnd = new Date();
+        const key = btn.dataset.range;
+        if (key === 'MAX') {
+          let earliest = getEarliestAvailableDate();
           if (!earliest) {
-            el('errorMsg').textContent = 'Failed to load historical data. Please try again or refresh the page.';
-            showError(true);
-            return;
+            await loadAllData();
+            earliest = getEarliestAvailableDate();
+            if (!earliest) {
+              el('errorMsg').textContent = 'Failed to load historical data. Please try again or refresh the page.';
+              showError(true);
+              return;
+            }
           }
+          rangeStart = new Date(earliest.getTime());
+        } else {
+          rangeStart = new Date(Date.now() - PRESET_DAYS[key] * 86_400_000);
         }
-        rangeStart = new Date(earliest.getTime());
-      } else {
-        rangeStart = new Date(Date.now() - PRESET_DAYS[key] * 86_400_000);
+        syncDateInputs();
+        renderFromDates();
+      } catch {
+        el('errorMsg').textContent = 'Failed to update date range. Please try again.';
+        showError(true);
       }
-      syncDateInputs();
-      renderFromDates();
     });
   });
 
