@@ -27,6 +27,7 @@ jobs:
           const SYMBOL = 'cvx.us';
           const HOSTS = ['https://stooq.com', 'https://stooq.pl'];
           const REQUEST_TIMEOUT_MS = 30000;
+          const MAX_ATTEMPTS = 3;
 
           function sleep(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));
@@ -83,7 +84,7 @@ jobs:
 
               if (!date || !isValidDateString(date)) continue;
               if (![open, high, low, close].every(v => Number.isFinite(v) && v > 0)) continue;
-              if (!Number.isFinite(volume) || volume < 0) continue;
+              if (!Number.isFinite(volume) || volume <= 0) continue;
 
               rows.push({ date, open, high, low, close, volume });
             }
@@ -132,7 +133,7 @@ jobs:
             for (const host of HOSTS) {
               const url = `${host}/q/d/l/?s=${SYMBOL}&i=d`;
               try {
-                for (let attempt = 1; attempt <= 3; attempt++) {
+                for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
                   try {
                     const text = await requestText(url);
                     const rows = parseCsv(text);
@@ -140,7 +141,7 @@ jobs:
                     return { rows, url };
                   } catch (err) {
                     lastError = err;
-                    if (attempt < 3) await sleep(1000 * (2 ** (attempt - 1)));
+                    if (attempt < MAX_ATTEMPTS) await sleep(1000 * (2 ** (attempt - 1)));
                   }
                 }
               } catch (err) {
