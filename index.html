@@ -767,7 +767,7 @@
   });
 
   function parseDateOnly(isoDate) {
-    return new Date(`${isoDate}T00:00:00`);
+    return new Date(`${isoDate}T00:00:00Z`);
   }
 
   function toISO(d) {
@@ -821,14 +821,19 @@
     if (!r.ok) throw new Error(`Could not load data.json: HTTP ${r.status}`);
     const json = await r.json();
     if (!json.data || json.data.length === 0) throw new Error('data.json is empty — please trigger the GitHub Action to populate it.');
-    cachedRows = json.data.map(d => ({
-      date: parseDateOnly(d.date),
-      open: Number.isFinite(Number(d.open)) ? Number(d.open) : Number(d.usd),
-      high: Number.isFinite(Number(d.high)) ? Number(d.high) : Number(d.usd),
-      low: Number.isFinite(Number(d.low)) ? Number(d.low) : Number(d.usd),
-      close: Number.isFinite(Number(d.close)) ? Number(d.close) : Number(d.usd),
-      volume: Number.isFinite(Number(d.volume)) ? Number(d.volume) : 0,
-    })).filter(d => (
+    cachedRows = json.data.map(d => {
+      // legacy rows used { date, usd, aud, fx }; treat usd as close/open/high/low fallback
+      const legacyUsd = Number(d.usd);
+      const fallback = Number.isFinite(legacyUsd) ? legacyUsd : NaN;
+      return {
+        date: parseDateOnly(d.date),
+        open: Number.isFinite(Number(d.open)) ? Number(d.open) : fallback,
+        high: Number.isFinite(Number(d.high)) ? Number(d.high) : fallback,
+        low: Number.isFinite(Number(d.low)) ? Number(d.low) : fallback,
+        close: Number.isFinite(Number(d.close)) ? Number(d.close) : fallback,
+        volume: Number.isFinite(Number(d.volume)) ? Number(d.volume) : 0,
+      };
+    }).filter(d => (
       Number.isFinite(d.open) &&
       Number.isFinite(d.high) &&
       Number.isFinite(d.low) &&

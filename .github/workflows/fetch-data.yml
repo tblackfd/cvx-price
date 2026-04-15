@@ -75,7 +75,8 @@ jobs:
               const volume = parseNumber(cols[idx.volume]);
 
               if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
-              if (![open, high, low, close].every(v => Number.isFinite(v) && v > 0)) continue;
+              if (![open, high, close].every(v => Number.isFinite(v) && v > 0)) continue;
+              if (!Number.isFinite(low) || low < 0) continue;
               if (!Number.isFinite(volume) || volume < 0) continue;
 
               rows.push({ date, open, high, low, close, volume });
@@ -179,7 +180,7 @@ jobs:
               updated: new Date().toISOString(),
               source: {
                 provider: 'stooq',
-                symbol: 'CVX.US',
+                symbol: SYMBOL.toUpperCase(),
                 url: sourceUrl || 'baseline-only',
                 schedule: 'daily',
                 baseline: 'cvx_us_d.csv'
