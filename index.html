@@ -824,13 +824,13 @@
     if (!json.data || json.data.length === 0) throw new Error('data.json is empty — please trigger the GitHub Action to populate it.');
     cachedRows = json.data.map(d => {
       // legacy rows used { date, usd, aud, fx }; treat usd as close/open/high/low fallback
-      const fallback = Number.isFinite(Number(d.usd)) ? Number(d.usd) : NaN;
+      const usdFallbackValue = Number.isFinite(Number(d.usd)) ? Number(d.usd) : NaN;
       return {
         date: parseIsoDateAsLocal(d.date),
-        open: Number.isFinite(Number(d.open)) ? Number(d.open) : fallback,
-        high: Number.isFinite(Number(d.high)) ? Number(d.high) : fallback,
-        low: Number.isFinite(Number(d.low)) ? Number(d.low) : fallback,
-        close: Number.isFinite(Number(d.close)) ? Number(d.close) : fallback,
+        open: Number.isFinite(Number(d.open)) ? Number(d.open) : usdFallbackValue,
+        high: Number.isFinite(Number(d.high)) ? Number(d.high) : usdFallbackValue,
+        low: Number.isFinite(Number(d.low)) ? Number(d.low) : usdFallbackValue,
+        close: Number.isFinite(Number(d.close)) ? Number(d.close) : usdFallbackValue,
         volume: Number.isFinite(Number(d.volume)) ? Number(d.volume) : 0,
       };
     }).filter(d => (

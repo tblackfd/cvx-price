@@ -28,6 +28,7 @@ jobs:
           const HOSTS = ['https://stooq.com', 'https://stooq.pl'];
           const REQUEST_TIMEOUT_MS = 30000;
           const MAX_ATTEMPTS = 3;
+          const INITIAL_RETRY_DELAY_MS = 1000;
 
           function sleep(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));
@@ -141,7 +142,7 @@ jobs:
                     return { rows, url };
                   } catch (err) {
                     lastError = err;
-                    if (attempt < MAX_ATTEMPTS) await sleep(1000 * (2 ** (attempt - 1)));
+                    if (attempt < MAX_ATTEMPTS) await sleep(INITIAL_RETRY_DELAY_MS * (2 ** (attempt - 1)));
                   }
                 }
               } catch (err) {
