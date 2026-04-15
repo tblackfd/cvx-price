@@ -1,0 +1,76 @@
+name: Download CVX full daily history (Stooq)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download CVX daily history from Stooq and save JSON
+        run: |
+          python - <<'PY'
+          import csv, json
+          from datetime import datetime, timezone
+          from urllib.request import urlopen
+
+          # Stooq US ticker format uses .US suffix; Chevron is CVX.US [2](https://community.home-assistant.io/t/alpha-vantage-no-longer-updating/450763)
+          symbol = "cvx.us"
+          url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"  # Stooq CSV download [3](https://glama.ai/mcp/servers/@calvernaz/alphavantage/tools/time_series_daily_adjusted)
+
+          with urlopen(url, timeout=60) as r:
+            text = r.read().decode("utf-8", errors="replace")
+
+          lines = text.strip().splitlines()
+          if not lines or not lines[0].lower().startswith("date,open,high,low,close,volume"):
+            raise RuntimeError("Unexpected Stooq response: " + text[:200])
+
+          reader = csv.DictReader(lines)
+          prices = []
+          for row in reader:
+            prices.append({
+              "date": row["Date"],
+              "open": float(row["Open"]),
+              "high": float(row["High"]),
+              "low": float(row["Low"]),
+              "close": float(row["Close"]),
+              "volume": int(float(row["Volume"])),
+            })
+
+          prices.sort(key=lambda x: x["date"])
+
+          payload = {
+            "meta": {
+              "source": "stooq.com",
+              "symbol": "CVX",
+              "stooq_symbol": "CVX.US",
+              "frequency": "daily",
+              "downloaded_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "record_count": len(prices),
+              "date_range": {
+                "start": prices[0]["date"] if prices else None,
+                "end": prices[-1]["date"] if prices else None
+              }
+            },
+            "prices": prices
+          }
+
+          out = "CVX_daily_history_stooq.json"
+          with open(out, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+          print(f"Wrote {out} with {len(prices)} rows.")
+          PY
+
+      - name: Upload JSON artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CVX_daily_history_stooq
+          path: CVX_daily_history_stooq.json
+          if-no-files-found: error
