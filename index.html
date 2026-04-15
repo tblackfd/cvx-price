@@ -807,7 +807,7 @@
       const earliestTs = cachedRows.reduce((minTs, row) => {
         const ts = row.date.getTime();
         return ts < minTs ? ts : minTs;
-      }, cachedRows[0].date.getTime());
+      }, Number.POSITIVE_INFINITY);
       return new Date(earliestTs);
     }
     return new Date('1999-01-01');
