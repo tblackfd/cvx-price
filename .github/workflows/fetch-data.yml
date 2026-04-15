@@ -109,7 +109,7 @@ jobs:
                   str(latest.iloc[AMOUNT_COL]).replace("$", "").strip()
               ),
               "currency": "USD",
-              "type": latest.iloc[TYPE_COL] if len(latest) > TYPE_COL else None,
+              "type": latest.iloc[TYPE_COL] if TYPE_COL < len(latest) else None,
               "source": {
                   "url": SOURCE_URL,
                   "scraped_utc": scraped_utc,
