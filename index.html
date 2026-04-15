@@ -675,6 +675,12 @@
       <button class="range-tab" data-range="MAX">MAX</button>
     </div>
 
+    <div class="chart-options">
+      <button class="option-btn active" data-view="aud">AUD</button>
+      <button class="option-btn" data-view="usd">USD</button>
+      <button class="option-btn" data-view="both">Both</button>
+    </div>
+
   </div>
 
   <!-- ── Date range bar ─────────────────────────────────────────── -->
@@ -733,14 +739,24 @@
       <div class="stat-sub" id="statLowDate"></div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Period Return (Close)</div>
+      <div class="stat-label">Period Return (AUD)</div>
       <div class="stat-value" id="statReturn">—</div>
       <div class="stat-sub">vs period open</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Average Volume</div>
-      <div class="stat-value" id="statVolume">—</div>
-      <div class="stat-sub">shares traded</div>
+      <div class="stat-label">Avg FX Rate</div>
+      <div class="stat-value" id="statFx">—</div>
+      <div class="stat-sub">AUD/USD average</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">FX Effect</div>
+      <div class="stat-value" id="statFxImpact">—</div>
+      <div class="stat-sub">AUD vs USD return</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Latest Dividend</div>
+      <div class="stat-value" id="statDividend">—</div>
+      <div class="stat-sub" id="statDividendDate">—</div>
     </div>
   </div>
 
@@ -790,6 +806,7 @@
   }
 
   // ── State ─────────────────────────────────────────────────────────
+  let currentView = 'aud';
   let allData     = [];
   let mainChart   = null;
   let fxChart     = null;
@@ -852,6 +869,10 @@
         aud_close: Number.isFinite(Number(d.aud_close)) && Number(d.aud_close) > 0
           ? Number(d.aud_close)
           : (Number.isFinite(Number(d.aud)) && Number(d.aud) > 0 ? Number(d.aud) : null),
+        // dividend amount per share in USD
+        dividend: Number.isFinite(Number(d.dividend)) && Number(d.dividend) >= 0
+          ? Number(d.dividend)
+          : (Number.isFinite(Number(d.dividend_amount)) && Number(d.dividend_amount) >= 0 ? Number(d.dividend_amount) : 0),
       };
     }).filter(d => (
       Number.isFinite(d.open) &&
@@ -916,7 +937,8 @@
   // ── Stats cards ───────────────────────────────────────────────────
   function renderStats() {
     const audCloses = allData.map(d => d.aud_close);
-    const vols = allData.map(d => d.volume);
+    const usdCloses = allData.map(d => d.close);
+    const fxs = allData.map(d => d.fx);
 
     const highVal = Math.max(...audCloses);
     const lowVal  = Math.min(...audCloses);
@@ -928,13 +950,29 @@
     el('statLow').textContent      = fmtAUD(lowVal);
     el('statLowDate').textContent  = fmtDate(allData[lowIdx].date);
 
-    const ret = ((audCloses.at(-1) - audCloses[0]) / audCloses[0]) * 100;
-    const avgVolume  = vols.reduce((a, b) => a + b, 0) / vols.length;
+    const audRet = ((audCloses.at(-1) - audCloses[0]) / audCloses[0]) * 100;
+    const usdRet = ((usdCloses.at(-1) - usdCloses[0]) / usdCloses[0]) * 100;
+    const fxImpact = audRet - usdRet;
+    const avgFx = fxs.reduce((a, b) => a + b, 0) / fxs.length;
 
     const retEl = el('statReturn');
-    retEl.textContent  = fmtPct(ret);
-    retEl.style.color  = ret >= 0 ? 'var(--positive)' : 'var(--negative)';
-    el('statVolume').textContent = fmtVol(avgVolume);
+    retEl.textContent  = fmtPct(audRet);
+    retEl.style.color  = audRet >= 0 ? 'var(--positive)' : 'var(--negative)';
+
+    el('statFx').textContent = avgFx.toFixed(4);
+
+    const impEl = el('statFxImpact');
+    impEl.textContent = `${fxImpact >= 0 ? '+' : ''}${fxImpact.toFixed(2)} percentage points`;
+    impEl.style.color = fxImpact >= 0 ? 'var(--positive)' : 'var(--negative)';
+
+    const latestDividend = [...(cachedRows || [])].reverse().find(d => Number.isFinite(d.dividend) && d.dividend > 0);
+    if (latestDividend) {
+      el('statDividend').textContent = `${(latestDividend.dividend * 100).toFixed(1)}¢`;
+      el('statDividendDate').textContent = fmtDate(latestDividend.date);
+    } else {
+      el('statDividend').textContent = '—';
+      el('statDividendDate').textContent = 'No dividend data';
+    }
   }
 
   // ── Chart helpers ─────────────────────────────────────────────────
@@ -1013,18 +1051,41 @@
     const ctx    = canvas.getContext('2d');
     if (mainChart) mainChart.destroy();
 
-    const datasets = [{
-      label: 'CVX Close (AUD)',
-      data: allData.map(d => d.aud_close),
-      borderColor: '#00c2ff',
-      backgroundColor: gradient(ctx, '#00c2ff'),
-      borderWidth: 2,
-      pointRadius: 0,
-      pointHoverRadius: 5,
-      fill: true,
-      tension: 0.3,
-      yAxisID: 'y',
-    }];
+    const showAUD  = currentView !== 'usd';
+    const showUSD  = currentView !== 'aud';
+    const bothAxes = showAUD && showUSD;
+
+    const datasets = [];
+
+    if (showAUD) {
+      datasets.push({
+        label: 'CVX Close (AUD)',
+        data: allData.map(d => d.aud_close),
+        borderColor: '#00c2ff',
+        backgroundColor: gradient(ctx, '#00c2ff'),
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 5,
+        fill: !bothAxes,
+        tension: 0.3,
+        yAxisID: bothAxes ? 'yAUD' : 'y',
+      });
+    }
+
+    if (showUSD) {
+      datasets.push({
+        label: 'CVX Close (USD)',
+        data: allData.map(d => d.close),
+        borderColor: '#f0a030',
+        backgroundColor: gradient(ctx, '#f0a030'),
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 5,
+        fill: !bothAxes,
+        tension: 0.3,
+        yAxisID: bothAxes ? 'yUSD' : 'y',
+      });
+    }
 
     const xScale = {
       type: 'time',
@@ -1034,14 +1095,34 @@
       border: { color: '#30363d' },
     };
 
-    const scales = {
-      x: xScale,
-      y: {
+    const scales = { x: xScale };
+
+    if (bothAxes) {
+      scales.yAUD = {
+        type: 'linear',
+        position: 'left',
         grid:   { color: GRID },
         ticks:  { color: '#00c2ff', callback: v => `A$${v.toFixed(0)}` },
         border: { color: '#30363d' },
-      }
-    };
+      };
+      scales.yUSD = {
+        type: 'linear',
+        position: 'right',
+        grid:   { drawOnChartArea: false },
+        ticks:  { color: '#f0a030', callback: v => `$${v.toFixed(0)}` },
+        border: { color: '#30363d' },
+      };
+    } else {
+      const isAUD = showAUD;
+      scales.y = {
+        grid:   { color: GRID },
+        ticks:  {
+          color: isAUD ? '#00c2ff' : '#f0a030',
+          callback: v => isAUD ? `A$${v.toFixed(0)}` : `$${v.toFixed(0)}`,
+        },
+        border: { color: '#30363d' },
+      };
+    }
 
     mainChart = new Chart(ctx, {
       type: 'line',
@@ -1172,6 +1253,16 @@
         el('errorMsg').textContent = 'Failed to update date range. Please try again.';
         showError(true);
       }
+    });
+  });
+
+  // AUD / USD / Both view toggle
+  document.querySelectorAll('.option-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.option-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentView = btn.dataset.view;
+      if (allData.length) renderMainChart();
     });
   });
 

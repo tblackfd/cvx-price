@@ -56,9 +56,13 @@ jobs:
             const h = lines[0].split(',');
             const i = {
               date: h.indexOf('Date'), open: h.indexOf('Open'), high: h.indexOf('High'),
-              low: h.indexOf('Low'), close: h.indexOf('Close'), volume: h.indexOf('Volume')
+              low: h.indexOf('Low'), close: h.indexOf('Close'), volume: h.indexOf('Volume'),
+              dividend: h.indexOf('Dividend')
             };
-            if (Object.values(i).some(x => x < 0)) throw new Error('cvx_us_d.csv missing required columns');
+            // Dividend column is optional for backward compatibility with existing baseline CSV snapshots.
+            if ([i.date, i.open, i.high, i.low, i.close, i.volume].some(x => x < 0)) {
+              throw new Error('cvx_us_d.csv missing required columns');
+            }
             const rows = [];
             for (const line of lines.slice(1)) {
               const c = line.split(',');
@@ -66,10 +70,11 @@ jobs:
               const open = parseNum(c[i.open]), high = parseNum(c[i.high]);
               const low = parseNum(c[i.low]), close = parseNum(c[i.close]);
               const volume = parseNum(c[i.volume]);
+              const dividend = i.dividend >= 0 ? parseNum(c[i.dividend]) : 0;
               if (!date || !validDate(date)) continue;
               if (![open, high, low, close].every(v => Number.isFinite(v) && v > 0)) continue;
               if (!Number.isFinite(volume) || volume <= 0) continue;
-              rows.push({ date, open, high, low, close, volume });
+              rows.push({ date, open, high, low, close, volume, dividend: Number.isFinite(dividend) && dividend >= 0 ? dividend : 0 });
             }
             return rows;
           }
@@ -93,8 +98,8 @@ jobs:
           }
 
           function toCvxCsv(rows) {
-            return 'Date,Open,High,Low,Close,Volume\n' +
-              rows.map(r => `${r.date},${r.open},${r.high},${r.low},${r.close},${r.volume}`).join('\n') + '\n';
+            return 'Date,Open,High,Low,Close,Volume,Dividend\n' +
+              rows.map(r => `${r.date},${r.open},${r.high},${r.low},${r.close},${r.volume},${Number.isFinite(r.dividend) ? r.dividend : 0}`).join('\n') + '\n';
           }
 
           function toFxCsv(rows) {
@@ -167,9 +172,10 @@ jobs:
               const close    = Number.isFinite(adjClose) && adjClose > 0 ? adjClose : Number(v['4. close']);
               const open = Number(v['1. open']), high = Number(v['2. high']);
               const low  = Number(v['3. low']),  volume = Number(v['6. volume']);
+              const dividend = Number(v['7. dividend amount']);
               if (![open, high, low, close].every(x => Number.isFinite(x) && x > 0)) return [];
               if (!Number.isFinite(volume) || volume <= 0) return [];
-              return [{ date, open, high, low, close, volume }];
+              return [{ date, open, high, low, close, volume, dividend: Number.isFinite(dividend) && dividend >= 0 ? dividend : 0 }];
             });
           }
 
@@ -221,7 +227,8 @@ jobs:
                 open: row.open, high: row.high, low: row.low,
                 close: row.close, volume: row.volume,
                 fx,
-                aud_close: row.close / fx
+                aud_close: row.close / fx,
+                dividend: Number.isFinite(row.dividend) && row.dividend >= 0 ? row.dividend : 0
               });
             }
             return result;
