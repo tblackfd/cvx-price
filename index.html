@@ -812,7 +812,7 @@
       earliestAvailableDate = new Date(earliestTs);
       return earliestAvailableDate;
     }
-    return new Date('1999-01-04');
+    return null;
   }
 
   // Both datasets fetched once per session and filtered client-side —
@@ -843,7 +843,6 @@
       aud:  d.aud,
       fx:   d.fx,
     }));
-    earliestAvailableDate = getEarliestAvailableDate();
     return { rows: cachedRows, updated: json.updated };
   }
 
@@ -1171,7 +1170,12 @@
       rangeEnd = new Date();
       const key = btn.dataset.range;
       if (key === 'MAX') {
-        rangeStart = getEarliestAvailableDate();
+        const earliest = getEarliestAvailableDate();
+        if (!earliest) {
+          loadData();
+          return;
+        }
+        rangeStart = earliest;
       } else {
         rangeStart = new Date(Date.now() - PRESET_DAYS[key] * 86_400_000);
       }
