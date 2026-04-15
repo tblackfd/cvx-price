@@ -36,6 +36,8 @@ jobs:
           const REQUEST_TIMEOUT_MS  = 30000;
           const RETRY_ATTEMPTS      = 3;
           const RETRY_BASE_DELAY_MS = 1500;
+          const MIN_PLAUSIBLE_DIVIDEND = 0;
+          const MAX_PLAUSIBLE_DIVIDEND = 10;
           const RATE_LIMIT_PATTERN  = /rate limit|premium endpoint|free API requests|requests per day|requests per second|spreading out/i;
           const TRANSIENT_PATTERN   = /econnreset|etimedout|eai_again|enotfound|socket hang up|network/i;
 
@@ -48,6 +50,9 @@ jobs:
             const cleaned = String(v).replace(/[$,\s]/g, '');
             const n = Number(cleaned);
             return Number.isFinite(n) ? n : null;
+          }
+          function isPlausibleDividendAmount(v) {
+            return Number.isFinite(v) && v > MIN_PLAUSIBLE_DIVIDEND && v < MAX_PLAUSIBLE_DIVIDEND;
           }
 
           function validDate(d) {
@@ -137,7 +142,7 @@ jobs:
               const amountMatch = text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
               const amount = amountMatch ? parseCurrency(amountMatch[0]) : null;
               const dates = pickRecordAndPaymentDates(text);
-              if (!Number.isFinite(amount) || amount <= 0 || !dates) continue;
+              if (!isPlausibleDividendAmount(amount) || !dates) continue;
               const { record_date, payment_date } = dates;
               if (!validDate(record_date) || !validDate(payment_date)) continue;
               rows.push({ amount, record_date, payment_date });
@@ -150,7 +155,7 @@ jobs:
             const amountMatch = text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
             const dates = pickRecordAndPaymentDates(text);
             const amount = amountMatch ? parseCurrency(amountMatch[0]) : null;
-            if (!Number.isFinite(amount) || amount <= 0 || !dates) return null;
+            if (!isPlausibleDividendAmount(amount) || !dates) return null;
             return {
               amount,
               record_date: dates.record_date,
@@ -388,15 +393,52 @@ jobs:
             });
             const rows = json?.data?.dividends?.rows;
             if (!Array.isArray(rows) || rows.length === 0) throw new Error('No NASDAQ dividend rows');
-            for (const row of rows) {
+            const parsedRows = [];
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i] || {};
               const amount = parseCurrency(row.amount);
-              const recordDate = normalizeDateToken(row.recordDate);
               const paymentDate = normalizeDateToken(row.paymentDate);
-              if (!Number.isFinite(amount) || amount <= 0) continue;
-              if (!validDate(recordDate) || !validDate(paymentDate)) continue;
-              return { amount, record_date: recordDate, payment_date: paymentDate };
+              const recordDate = normalizeDateToken(row.recordDate);
+              const declaredDate = normalizeDateToken(row.declarationDate || row.declaredDate);
+              const exDate = normalizeDateToken(row.exDivDate || row.exDate || row.exDividendDate);
+              if (!isPlausibleDividendAmount(amount)) continue;
+              const selectedDate = paymentDate || recordDate || declaredDate || exDate;
+              if (!validDate(selectedDate)) continue;
+              const normalizedRecordDate = recordDate || declaredDate || exDate || selectedDate;
+              const normalizedPaymentDate = paymentDate || recordDate || declaredDate || exDate || selectedDate;
+              if (!validDate(normalizedRecordDate) || !validDate(normalizedPaymentDate)) continue;
+              const dateSource = paymentDate
+                ? 'paymentDate'
+                : (recordDate ? 'recordDate' : (declaredDate ? 'declaredDate' : 'exDate'));
+              parsedRows.push({
+                row_index: i,
+                amount,
+                record_date: normalizedRecordDate,
+                payment_date: normalizedPaymentDate,
+                selected_date: selectedDate,
+                selected_date_source: dateSource,
+                raw_payment_date: paymentDate || null
+              });
             }
-            throw new Error('Could not parse NASDAQ dividend rows');
+            if (parsedRows.length === 0) throw new Error('Could not parse NASDAQ dividend rows');
+            parsedRows.sort((a, b) => {
+              if (a.selected_date !== b.selected_date) return a.selected_date.localeCompare(b.selected_date);
+              if (a.payment_date !== b.payment_date) return a.payment_date.localeCompare(b.payment_date);
+              return a.row_index - b.row_index;
+            });
+            const selected = parsedRows[parsedRows.length - 1];
+            const paymentRows = parsedRows.filter(r => r.raw_payment_date);
+            if (paymentRows.length > 0) {
+              const maxPaymentDate = paymentRows.reduce((max, r) => r.raw_payment_date > max ? r.raw_payment_date : max, paymentRows[0].raw_payment_date);
+              if (selected.raw_payment_date !== maxPaymentDate) {
+                console.warn(`NASDAQ self-check: selected row does not have the max payment date among parsed rows (selected=${selected.raw_payment_date || 'n/a'}, max=${maxPaymentDate})`);
+              } else {
+                console.log(`NASDAQ self-check passed: selected row has max payment date ${maxPaymentDate}`);
+              }
+            } else {
+              console.warn('NASDAQ self-check: no rows had paymentDate; selected latest row using record/declared/exDate fallback');
+            }
+            return selected;
           }
 
           // ── Merge + join helpers ──────────────────────────────────────
@@ -482,12 +524,12 @@ jobs:
             let latestDividend = existingLatestDividend;
             try {
               latestDividend = await withRetry('CHEVRON_DIVIDEND', fetchLatestChevronDividend);
-              console.log(`Latest Chevron dividend: $${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
+              console.log(`Dividend source=Chevron amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
             } catch (err) {
               console.warn(`Chevron dividend fetch/parse issue: ${err.message}. Trying NASDAQ fallback…`);
               try {
                 latestDividend = await fetchNasdaqDividend();
-                console.log(`Dividend from NASDAQ fallback: $${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
+                console.log(`Dividend source=NASDAQ row=${latestDividend.row_index} selected_date=${latestDividend.selected_date} selected_by=${latestDividend.selected_date_source} amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
               } catch (err2) {
                 if (latestDividend) {
                   console.warn(`NASDAQ fallback also failed (${err2.message}), keeping previous latest_dividend metadata`);
