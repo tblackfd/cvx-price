@@ -1,6 +1,7 @@
 - name: Test scrape latest CVX dividend
+  shell: bash
   run: |
-    python <<'PY'
+    cat > scrape_dividend.py <<'EOF'
 import os
 import re
 import io
@@ -60,9 +61,7 @@ if target is None:
     raise RuntimeError("Dividend table not found")
 
 target.columns = [str(c).strip().lower() for c in target.columns]
-
-keep = [c for c in ["declared", "record", "payable", "amount", "type"] if c in target.columns]
-df = target[keep].dropna(how="all")
+df = target.dropna(how="all")
 
 amount_re = re.compile(r"\$?\s*\d+(\.\d+)?")
 date_re = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
@@ -73,7 +72,7 @@ def parse_date(s):
 
 rows = []
 for _, r in df.iterrows():
-    if amount_re.match(str(r["amount"])) and date_re.match(str(r["declared"])):
+    if amount_re.match(str(r.get("amount", ""))) and date_re.match(str(r.get("declared", ""))):
         rows.append(r)
 
 if not rows:
@@ -83,14 +82,13 @@ latest = rows[0]
 
 out = {
     "ticker": "CVX",
-    "declared_date": parse_date(latest["declared"]),
-    "record_date": parse_date(latest["record"]),
-    "payable_date": parse_date(latest["payable"]),
+    "declared_date": parse_date(latest.get("declared")),
+    "record_date": parse_date(latest.get("record")),
+    "payable_date": parse_date(latest.get("payable")),
     "amount_per_share": float(
-        str(latest["amount"]).replace("$", "").strip()
+        str(latest.get("amount")).replace("$", "").strip()
     ),
     "currency": "USD",
-    "type": latest.get("type", ""),
     "source": {
         "url": SOURCE_URL,
         "scraped_utc": scraped_utc,
@@ -104,4 +102,6 @@ with open(OUT_JSON, "w") as f:
 df.to_csv(OUT_CSV, index=False)
 
 print(json.dumps(out, indent=2))
-PY
+EOF
+
+    python scrape_dividend.py
