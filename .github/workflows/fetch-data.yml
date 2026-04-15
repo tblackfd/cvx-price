@@ -27,7 +27,7 @@ jobs:
           const BASELINE_CVX_CSV = path.resolve('cvx_us_d.csv');
           const BASELINE_FX_CSV  = path.resolve('DEXUSAL.csv');
           const OUTPUT_JSON      = path.resolve('data.json');
-          const CHEVRON_DIVIDEND_URL = 'https://www.chevron.com/investors/stock-and-dividend';
+          const GCS_WEB_DIVIDEND_URL = 'https://chevroncorp.gcs-web.com/stock-information/dividend-history';
           const HTTP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
           const API_KEY = process.env.ALPHA_VANTAGE_KEY;
@@ -132,35 +132,54 @@ jobs:
             }
             return payment >= record ? { record_date: record, payment_date: payment } : null;
           }
-          function parseChevronLatestDividend(html) {
+          function parseGcsWebDividendRows(html) {
+            const visibleText = decodeHtmlEntities(
+              String(html || '')
+                .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                .replace(/<\/(?:tr|p|div|li|br|h[1-6]|table|section)>/gi, '\n')
+                .replace(/<[^>]+>/g, ' ')
+            )
+              .replace(/\u00A0/g, ' ')
+              .replace(/[ \t]+/g, ' ')
+              .replace(/\s*\n\s*/g, '\n')
+              .trim();
             const rows = [];
-            const rowMatches = html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi);
-            for (const m of rowMatches) {
-              const rowHtml = m[1];
-              const text = decodeHtmlEntities(rowHtml.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
-              if (!text) continue;
-              const amountMatch = text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
-              const amount = amountMatch ? parseCurrency(amountMatch[0]) : null;
-              const dates = pickRecordAndPaymentDates(text);
-              if (!isPlausibleDividendAmount(amount) || !dates) continue;
-              const { record_date, payment_date } = dates;
-              if (!validDate(record_date) || !validDate(payment_date)) continue;
-              rows.push({ amount, record_date, payment_date });
+            const seen = new Set();
+            const rowPattern = /(\d{1,2}\/\d{1,2}\/\d{2,4})\s+(\d{1,2}\/\d{1,2}\/\d{2,4})\s+(\d{1,2}\/\d{1,2}\/\d{2,4})\s+\$?\s*([0-9]+(?:\.[0-9]{1,3})?)\s+([A-Za-z][A-Za-z \/-]{1,30})/g;
+            let m;
+            while ((m = rowPattern.exec(visibleText)) !== null) {
+              const declaredDate = normalizeDateToken(m[1]);
+              const recordDate = normalizeDateToken(m[2]);
+              const payableDate = normalizeDateToken(m[3]);
+              const amount = parseCurrency(m[4]);
+              const type = String(m[5] || '').trim();
+              if (!isPlausibleDividendAmount(amount)) continue;
+              if (!validDate(declaredDate) || !validDate(recordDate) || !validDate(payableDate)) continue;
+              if (payableDate < recordDate) continue;
+              if (!/\bcash\b|\bstock\b|\bspecial\b|\breturn\b/i.test(type)) continue;
+              const key = `${declaredDate}|${recordDate}|${payableDate}|${amount}|${type.toLowerCase()}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              rows.push({
+                declared_date: declaredDate,
+                record_date: recordDate,
+                payment_date: payableDate,
+                amount,
+                type
+              });
             }
-            if (rows.length > 0) {
-              rows.sort((a, b) => a.payment_date.localeCompare(b.payment_date));
-              return rows[rows.length - 1];
-            }
-            const text = decodeHtmlEntities(html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
-            const amountMatch = text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
-            const dates = pickRecordAndPaymentDates(text);
-            const amount = amountMatch ? parseCurrency(amountMatch[0]) : null;
-            if (!isPlausibleDividendAmount(amount) || !dates) return null;
-            return {
-              amount,
-              record_date: dates.record_date,
-              payment_date: dates.payment_date
-            };
+            return rows;
+          }
+          function parseLatestGcsWebDividend(html) {
+            const rows = parseGcsWebDividendRows(html);
+            if (rows.length === 0) return { rows, latest: null };
+            rows.sort((a, b) => {
+              if (a.payment_date !== b.payment_date) return a.payment_date.localeCompare(b.payment_date);
+              if (a.record_date !== b.record_date) return a.record_date.localeCompare(b.record_date);
+              return a.declared_date.localeCompare(b.declared_date);
+            });
+            return { rows, latest: rows[rows.length - 1] };
           }
           function getExistingLatestDividend() {
             if (!fs.existsSync(OUTPUT_JSON)) return null;
@@ -361,11 +380,12 @@ jobs:
               return [{ date, fx }];
             });
           }
-          async function fetchLatestChevronDividend() {
-            const html = await getText(CHEVRON_DIVIDEND_URL);
-            const parsed = parseChevronLatestDividend(html);
-            if (!parsed) throw new Error('Could not parse latest dividend from Chevron page');
-            return parsed;
+          async function fetchLatestGcsWebDividend() {
+            const html = await getText(GCS_WEB_DIVIDEND_URL);
+            const parsed = parseLatestGcsWebDividend(html);
+            if (!parsed.latest) throw new Error('Could not parse latest dividend from GCS-web page');
+            console.log(`GCS-web parsed ${parsed.rows.length} dividend rows`);
+            return parsed.latest;
           }
 
           async function fetchNasdaqDividend() {
@@ -522,18 +542,23 @@ jobs:
             const data = buildOutput(mergedCvx, mergedFx);
             if (data.length === 0) throw new Error('No output rows after joining CVX and FX data');
             let latestDividend = existingLatestDividend;
+            let latestDividendSource = existingLatestDividend ? 'previous' : 'none';
             try {
-              latestDividend = await withRetry('CHEVRON_DIVIDEND', fetchLatestChevronDividend);
-              console.log(`Dividend source=Chevron amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
+              latestDividend = await withRetry('GCS_WEB_DIVIDEND', fetchLatestGcsWebDividend);
+              latestDividendSource = 'gcs-web';
+              console.log(`Dividend source=GCS-web amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
             } catch (err) {
-              console.warn(`Chevron dividend fetch/parse issue: ${err.message}. Trying NASDAQ fallback…`);
+              console.warn(`GCS-web dividend fetch/parse issue: ${err.message}. Trying NASDAQ fallback…`);
               try {
                 latestDividend = await fetchNasdaqDividend();
+                latestDividendSource = 'nasdaq';
                 console.log(`Dividend source=NASDAQ row=${latestDividend.row_index} selected_date=${latestDividend.selected_date} selected_by=${latestDividend.selected_date_source} amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
               } catch (err2) {
                 if (latestDividend) {
+                  latestDividendSource = 'previous';
                   console.warn(`NASDAQ fallback also failed (${err2.message}), keeping previous latest_dividend metadata`);
                 } else {
+                  latestDividendSource = 'none';
                   console.warn(`All dividend sources failed (${err2.message}), setting latest_dividend to null`);
                   latestDividend = null;
                 }
@@ -542,6 +567,9 @@ jobs:
             if (latestDividend) {
               const payDays = Math.floor((Date.now() - new Date(`${latestDividend.payment_date}T00:00:00Z`).getTime()) / 86400000);
               if (payDays > 120) console.warn(`Dividend metadata may be stale: payment_date=${latestDividend.payment_date} is ${payDays} days old`);
+              console.log(`Dividend final source=${latestDividendSource} amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
+            } else {
+              console.log(`Dividend final source=${latestDividendSource} latest_dividend=null`);
             }
 
             const first = data[0], last = data[data.length - 1];
@@ -557,7 +585,8 @@ jobs:
                 schedule: 'daily',
                 baseline_cvx: 'cvx_us_d.csv',
                 baseline_fx: 'DEXUSAL.csv',
-                dividend_source_url: CHEVRON_DIVIDEND_URL
+                dividend_source_url: GCS_WEB_DIVIDEND_URL,
+                dividend_fallback_source_url: 'https://api.nasdaq.com/api/quote/CVX/dividends?assetclass=stocks'
               },
               latest_dividend: latestDividend ? {
                 amount: latestDividend.amount,
