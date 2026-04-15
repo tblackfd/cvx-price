@@ -804,7 +804,10 @@
 
   function getEarliestAvailableDate() {
     if (cachedRows && cachedRows.length > 0) {
-      const earliestTs = Math.min(...cachedRows.map(d => d.date.getTime()));
+      const earliestTs = cachedRows.reduce((minTs, row) => {
+        const ts = row.date.getTime();
+        return ts < minTs ? ts : minTs;
+      }, cachedRows[0].date.getTime());
       return new Date(earliestTs);
     }
     return new Date('1999-01-01');
