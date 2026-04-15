@@ -805,6 +805,7 @@
   function getEarliestAvailableDate() {
     if (earliestAvailableDate) return earliestAvailableDate;
     if (cachedRows && cachedRows.length > 0) {
+      // data.json is produced in ascending date order by the fetch workflow merge step
       earliestAvailableDate = new Date(cachedRows[0].date.getTime());
       return earliestAvailableDate;
     }
@@ -1171,7 +1172,7 @@
           await loadAllData();
           earliest = getEarliestAvailableDate();
           if (!earliest) {
-            el('errorMsg').textContent = 'Could not determine earliest available date.';
+            el('errorMsg').textContent = 'Failed to load historical data. Please try again or refresh the page.';
             showError(true);
             return;
           }
