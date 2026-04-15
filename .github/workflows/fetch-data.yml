@@ -74,25 +74,17 @@ jobs:
           scraped_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
           tables = pd.read_html(io.StringIO(html))
-          if not tables:
+          if len(tables) == 0:
               raise RuntimeError("No HTML tables found")
-
-          expected = {"declared", "record", "payable", "amount", "type"}
-          target = None
-
-          for t in tables:
-              cols = [str(c).lower().strip() for c in t.columns]
-              if expected.issubset(cols):
-                  target = t.copy()
-                  break
-
-          if target is None:
-              raise RuntimeError("Dividend table not found")
-
-          target.columns = [str(c).strip().lower() for c in target.columns]
-
-          keep = [c for c in ["declared", "record", "payable", "amount", "type"] if c in target.columns]
-          df = target[keep].dropna(how="all")
+          df = tables[0].dropna(how="all")
+          DECLARED_COL = 0
+          RECORD_COL = 1
+          PAYABLE_COL = 2
+          AMOUNT_COL = 3
+          TYPE_COL = 4
+          MIN_REQUIRED_COLS = AMOUNT_COL + 1
+          if df.shape[1] < MIN_REQUIRED_COLS:
+              raise RuntimeError(f"Unexpected dividend table shape: {df.shape}. Expected at least {MIN_REQUIRED_COLS} columns")
 
           amount_re = re.compile(r"\$?\s*\d+(\.\d+)?")
           date_re = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
@@ -103,7 +95,7 @@ jobs:
 
           rows = []
           for _, r in df.iterrows():
-              if amount_re.match(str(r["amount"])) and date_re.match(str(r["declared"])):
+              if amount_re.match(str(r.iloc[AMOUNT_COL])) and date_re.match(str(r.iloc[DECLARED_COL])):
                   rows.append(r)
 
           if not rows:
@@ -113,14 +105,14 @@ jobs:
 
           out = {
               "ticker": "CVX",
-              "declared_date": parse_date(latest["declared"]),
-              "record_date": parse_date(latest["record"]),
-              "payable_date": parse_date(latest["payable"]),
+              "declared_date": parse_date(latest.iloc[DECLARED_COL]),
+              "record_date": parse_date(latest.iloc[RECORD_COL]),
+              "payable_date": parse_date(latest.iloc[PAYABLE_COL]),
               "amount_per_share": float(
-                  str(latest["amount"]).replace("$", "").strip()
+                  str(latest.iloc[AMOUNT_COL]).replace("$", "").strip()
               ),
               "currency": "USD",
-              "type": latest.get("type") or None,
+              "type": latest.iloc[TYPE_COL] if df.shape[1] > TYPE_COL else None,
               "source": {
                   "url": SOURCE_URL,
                   "scraped_utc": scraped_utc,
