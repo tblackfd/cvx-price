@@ -1029,9 +1029,10 @@
     return g;
   }
 
-  const GRID         = 'rgba(48,54,61,0.6)';
-  const MUTED        = '#8b949e';
-  const Y_AXIS_WIDTH = 68;  // shared left y-axis width keeps volume & price charts aligned
+  const GRID                 = 'rgba(48,54,61,0.6)';
+  const MUTED                = '#8b949e';
+  const Y_AXIS_WIDTH         = 68; // shared left y-axis width keeps volume & price charts aligned
+  const RIGHT_AXIS_WIDTH     = 56; // reserve right-side USD axis label space for chart alignment
 
   // ── FX mini-chart ─────────────────────────────────────────────────
   function renderFxChart() {
@@ -1094,6 +1095,10 @@
     const volumeData = allData.filter(d => d.date >= rangeStart && d.date <= rangeEnd);
     if (!volumeData.length) return;
 
+    const showAUD  = currentView !== 'usd';
+    const showUSD  = currentView !== 'aud';
+    const bothAxes = showAUD && showUSD;
+
     volumeChart = new Chart(ctx, {
       type: 'bar',
       data: {
@@ -1112,6 +1117,7 @@
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        layout: { padding: { right: bothAxes ? RIGHT_AXIS_WIDTH : 0 } },
         interaction: { mode: 'index', intersect: false },
         plugins: {
           legend: { display: false },
@@ -1206,6 +1212,7 @@
       scales.yUSD = {
         type: 'linear',
         position: 'right',
+        afterFit(scale) { scale.width = RIGHT_AXIS_WIDTH; },
         grid:   { drawOnChartArea: false },
         ticks:  { color: '#f0a030', callback: v => `$${v.toFixed(0)}` },
         border: { color: '#30363d' },
