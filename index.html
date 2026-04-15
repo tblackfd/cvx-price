@@ -819,7 +819,14 @@
   const fmtAUD = n => n == null ? '—' : `A$${n.toFixed(2)}`;
   const fmtFX  = n => n == null ? '—' : n.toFixed(4);
   const fmtPct = n => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
-  const fmtVol = n => n == null ? '—' : Math.round(n).toLocaleString('en-US');
+  const fmtVol      = n => n == null ? '—' : Math.round(n).toLocaleString('en-US');
+  const fmtVolShort = n => {
+    if (n == null) return '—';
+    if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+    if (n >= 1e6) return `${(n / 1e6).toFixed(0)}M`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(0)}K`;
+    return String(Math.round(n));
+  };
   const fmtDate = d => d.toLocaleDateString('en-AU', {
     day: 'numeric', month: 'short', year: 'numeric'
   });
@@ -1022,8 +1029,9 @@
     return g;
   }
 
-  const GRID  = 'rgba(48,54,61,0.6)';
-  const MUTED = '#8b949e';
+  const GRID         = 'rgba(48,54,61,0.6)';
+  const MUTED        = '#8b949e';
+  const Y_AXIS_WIDTH = 68;  // shared left y-axis width keeps volume & price charts aligned
 
   // ── FX mini-chart ─────────────────────────────────────────────────
   function renderFxChart() {
@@ -1115,6 +1123,7 @@
         scales: {
           x: {
             type: 'time',
+            offset: false,            // match line-chart default so bars align with price points
             time: { unit: getTimeUnit() },
             grid:   { color: GRID },
             ticks:  { color: MUTED, maxTicksLimit: 8 },
@@ -1122,8 +1131,9 @@
           },
           y: {
             beginAtZero: true,
+            afterFit(scale) { scale.width = Y_AXIS_WIDTH; },
             grid:   { color: GRID },
-            ticks:  { color: '#00c2ff', callback: v => fmtVol(v) },
+            ticks:  { color: '#00c2ff', callback: v => fmtVolShort(v) },
             border: { color: '#30363d' },
           },
         },
@@ -1188,6 +1198,7 @@
       scales.yAUD = {
         type: 'linear',
         position: 'left',
+        afterFit(scale) { scale.width = Y_AXIS_WIDTH; },
         grid:   { color: GRID },
         ticks:  { color: '#00c2ff', callback: v => `A$${v.toFixed(0)}` },
         border: { color: '#30363d' },
@@ -1202,6 +1213,7 @@
     } else {
       const isAUD = showAUD;
       scales.y = {
+        afterFit(scale) { scale.width = Y_AXIS_WIDTH; },
         grid:   { color: GRID },
         ticks:  {
           color: isAUD ? '#00c2ff' : '#f0a030',
