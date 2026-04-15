@@ -1172,11 +1172,11 @@
       if (key === 'MAX') {
         let earliest = getEarliestAvailableDate();
         if (!earliest) {
-          await loadData();
+          await loadAllData();
           earliest = getEarliestAvailableDate();
           if (!earliest) return;
         }
-        rangeStart = new Date(earliest);
+        rangeStart = new Date(earliest.getTime());
       } else {
         rangeStart = new Date(Date.now() - PRESET_DAYS[key] * 86_400_000);
       }
