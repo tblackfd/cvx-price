@@ -874,13 +874,29 @@
   // switching range tabs never triggers another network request.
   // ── Data is prepared server-side by a GitHub Action and stored in data.json.
   //
-  // data.json shape: { updated: ISO string, data: [{ date, open, high, low, close, volume }] }
+  // data.json shape: {
+  //   updated: ISO string,
+  //   latest_dividend: { amount, record_date, payment_date } | null,
+  //   data: [{ date, open, high, low, close, volume, fx, aud_close, dividend }]
+  // }
 
   let cachedRows = null; // full dataset from data.json
+  let cachedLatestDividend = null; // { amount, recordDate, paymentDate } from latest_dividend
   let earliestAvailableDate = null;
 
+  function parseLatestDividendMeta(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const amount = Number(raw.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    if (typeof raw.record_date !== 'string' || typeof raw.payment_date !== 'string') return null;
+    const recordDate = parseIsoDateAsLocal(raw.record_date);
+    const paymentDate = parseIsoDateAsLocal(raw.payment_date);
+    if (Number.isNaN(recordDate.getTime()) || Number.isNaN(paymentDate.getTime())) return null;
+    return { amount, recordDate, paymentDate };
+  }
+
   async function loadAllData(forceRefresh = false) {
-    if (cachedRows && !forceRefresh) return { rows: cachedRows, updated: null };
+    if (cachedRows && !forceRefresh) return { rows: cachedRows, updated: null, latestDividend: cachedLatestDividend };
     earliestAvailableDate = null;
     const cacheBuster = forceRefresh ? `?t=${Date.now()}` : '';
     const r = await fetch(`data.json${cacheBuster}`, {
@@ -920,7 +936,8 @@
       d.fx != null &&
       d.aud_close != null
     ));
-    return { rows: cachedRows, updated: json.updated };
+    cachedLatestDividend = parseLatestDividendMeta(json.latest_dividend);
+    return { rows: cachedRows, updated: json.updated, latestDividend: cachedLatestDividend };
   }
 
   // ── Main load ─────────────────────────────────────────────────────
@@ -929,14 +946,14 @@
     showError(false);
 
     try {
-      const { rows, updated } = await loadAllData(forceRefresh);
+      const { rows, updated, latestDividend } = await loadAllData(forceRefresh);
 
       allData = rows.filter(d => d.date >= rangeStart && d.date <= rangeEnd);
       allData.sort((a, b) => a.date - b.date);
       if (allData.length === 0) throw new Error('No data found for selected range.');
 
       renderHero();
-      renderStats();
+      renderStats(latestDividend);
       renderMainChart();
       renderVolumeChart();
       renderFxChart();
@@ -973,7 +990,7 @@
   }
 
   // ── Stats cards ───────────────────────────────────────────────────
-  function renderStats() {
+  function renderStats(latestDividendMeta = null) {
     const audCloses = allData.map(d => d.aud_close);
     const usdCloses = allData.map(d => d.close);
     const fxs = allData.map(d => d.fx);
@@ -1003,13 +1020,18 @@
     impEl.textContent = `${fxImpact >= 0 ? '+' : ''}${fxImpact.toFixed(2)} percentage points`;
     impEl.style.color = fxImpact >= 0 ? 'var(--positive)' : 'var(--negative)';
 
-    const latestDividend = [...(cachedRows || [])].reverse().find(d => Number.isFinite(d.dividend) && d.dividend > 0);
-    if (latestDividend) {
-      el('statDividend').textContent = `${(latestDividend.dividend * 100).toFixed(1)}¢`;
-      el('statDividendDate').textContent = fmtDate(latestDividend.date);
+    if (latestDividendMeta) {
+      el('statDividend').textContent = `${(latestDividendMeta.amount * 100).toFixed(1)}¢`;
+      el('statDividendDate').textContent = `Record ${fmtDate(latestDividendMeta.recordDate)} • Paid ${fmtDate(latestDividendMeta.paymentDate)}`;
     } else {
-      el('statDividend').textContent = '—';
-      el('statDividendDate').textContent = 'No dividend data';
+      const latestDividend = [...(cachedRows || [])].reverse().find(d => Number.isFinite(d.dividend) && d.dividend > 0);
+      if (latestDividend) {
+        el('statDividend').textContent = `${(latestDividend.dividend * 100).toFixed(1)}¢`;
+        el('statDividendDate').textContent = fmtDate(latestDividend.date);
+      } else {
+        el('statDividend').textContent = '—';
+        el('statDividendDate').textContent = 'No dividend data';
+      }
     }
   }
 

@@ -27,6 +27,8 @@ jobs:
           const BASELINE_CVX_CSV = path.resolve('cvx_us_d.csv');
           const BASELINE_FX_CSV  = path.resolve('DEXUSAL.csv');
           const OUTPUT_JSON      = path.resolve('data.json');
+          const CHEVRON_DIVIDEND_URL = 'https://www.chevron.com/investors/stock-and-dividend';
+          const HTTP_USER_AGENT = 'cvx-price-data-fetcher/1.0';
 
           const API_KEY = process.env.ALPHA_VANTAGE_KEY;
           if (!API_KEY) throw new Error('Missing ALPHA_VANTAGE_KEY secret');
@@ -41,11 +43,133 @@ jobs:
           function redact(s)  { return String(s || '').replaceAll(API_KEY, '[REDACTED]'); }
           function isObj(v)   { return v !== null && typeof v === 'object' && !Array.isArray(v); }
           function parseNum(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
+          function parseCurrency(v) {
+            if (v == null) return null;
+            const cleaned = String(v).replace(/[$,\s]/g, '');
+            const n = Number(cleaned);
+            return Number.isFinite(n) ? n : null;
+          }
 
           function validDate(d) {
             if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
             const p = new Date(`${d}T00:00:00Z`);
             return !Number.isNaN(p.getTime()) && p.toISOString().slice(0, 10) === d;
+          }
+          function normalizeDateToken(raw) {
+            const s = String(raw || '').trim();
+            if (!s) return null;
+            if (/^\d{4}-\d{2}-\d{2}$/.test(s) && validDate(s)) return s;
+            const mdyyyy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+            if (mdyyyy) {
+              const mm = Number(mdyyyy[1]);
+              const dd = Number(mdyyyy[2]);
+              const yyyy = mdyyyy[3].length === 2 ? Number(`20${mdyyyy[3]}`) : Number(mdyyyy[3]);
+              const iso = `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+              return validDate(iso) ? iso : null;
+            }
+            const parsed = new Date(s);
+            if (Number.isNaN(parsed.getTime())) return null;
+            return parsed.toISOString().slice(0, 10);
+          }
+          function decodeHtmlEntities(s) {
+            return String(s || '')
+              .replace(/&nbsp;/gi, ' ')
+              .replace(/&amp;/gi, '&')
+              .replace(/&quot;/gi, '"')
+              .replace(/&#39;|&apos;/gi, "'")
+              .replace(/&lt;/gi, '<')
+              .replace(/&gt;/gi, '>');
+          }
+          function extractDateCandidates(text) {
+            const out = [];
+            const patterns = [
+              /\b\d{4}-\d{2}-\d{2}\b/g,
+              /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g,
+              /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\b/gi
+            ];
+            for (const p of patterns) {
+              p.lastIndex = 0;
+              let m;
+              while ((m = p.exec(text)) !== null) {
+                const normalized = normalizeDateToken(m[0]);
+                if (!validDate(normalized)) continue;
+                out.push({ raw: m[0], normalized, index: m.index });
+              }
+            }
+            out.sort((a, b) => a.index - b.index);
+            return out;
+          }
+          function pickRecordAndPaymentDates(text) {
+            const candidates = extractDateCandidates(text);
+            if (candidates.length < 2) return null;
+            const lower = text.toLowerCase();
+            const dateNearKeyword = (keywordPattern) => {
+              for (const c of candidates) {
+                const start = Math.max(0, c.index - 40);
+                const end = Math.min(text.length, c.index + c.raw.length + 40);
+                const snippet = lower.slice(start, end);
+                if (keywordPattern.test(snippet)) return c.normalized;
+              }
+              return null;
+            };
+            let record = dateNearKeyword(/\brecord\b/);
+            let payment = dateNearKeyword(/\bpayment\b|\bpayable\b/);
+            if (!record || !payment) {
+              record = record || candidates[candidates.length - 2].normalized;
+              payment = payment || candidates[candidates.length - 1].normalized;
+            }
+            if (!validDate(record) || !validDate(payment)) return null;
+            if (payment < record) {
+              const unique = Array.from(new Set(candidates.map(c => c.normalized))).sort((a, b) => a.localeCompare(b));
+              if (unique.length < 2) return null;
+              record = unique[unique.length - 2];
+              payment = unique[unique.length - 1];
+            }
+            return payment >= record ? { record_date: record, payment_date: payment } : null;
+          }
+          function parseChevronLatestDividend(html) {
+            const rows = [];
+            const rowMatches = html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi);
+            for (const m of rowMatches) {
+              const rowHtml = m[1];
+              const text = decodeHtmlEntities(rowHtml.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+              if (!text) continue;
+              const amountMatch = text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
+              const amount = amountMatch ? parseCurrency(amountMatch[0]) : null;
+              const dates = pickRecordAndPaymentDates(text);
+              if (!Number.isFinite(amount) || amount <= 0 || !dates) continue;
+              const { record_date, payment_date } = dates;
+              if (!validDate(record_date) || !validDate(payment_date)) continue;
+              rows.push({ amount, record_date, payment_date });
+            }
+            if (rows.length > 0) {
+              rows.sort((a, b) => a.payment_date.localeCompare(b.payment_date));
+              return rows[rows.length - 1];
+            }
+            const text = decodeHtmlEntities(html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+            const amountMatch = text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
+            const dates = pickRecordAndPaymentDates(text);
+            const amount = amountMatch ? parseCurrency(amountMatch[0]) : null;
+            if (!Number.isFinite(amount) || amount <= 0 || !dates) return null;
+            return {
+              amount,
+              record_date: dates.record_date,
+              payment_date: dates.payment_date
+            };
+          }
+          function getExistingLatestDividend() {
+            if (!fs.existsSync(OUTPUT_JSON)) return null;
+            try {
+              const existing = JSON.parse(fs.readFileSync(OUTPUT_JSON, 'utf8'));
+              const d = existing?.latest_dividend;
+              if (!d) return null;
+              const amount = parseNum(d.amount);
+              if (!Number.isFinite(amount) || amount <= 0) return null;
+              if (!validDate(d.record_date) || !validDate(d.payment_date)) return null;
+              return { amount, record_date: d.record_date, payment_date: d.payment_date };
+            } catch {
+              return null;
+            }
           }
 
           // ── CSV parsers ──────────────────────────────────────────────
@@ -140,9 +264,37 @@ jobs:
               });
             });
           }
+          function getText(url, redirects = 0) {
+            return new Promise((resolve, reject) => {
+              if (redirects > 5) return reject(new Error('Too many redirects'));
+              const req = https.get(url, { headers: { 'User-Agent': HTTP_USER_AGENT, 'Accept': 'text/html,*/*;q=0.8' } }, res => {
+                if (!res.statusCode) return reject(new Error('Missing HTTP status code'));
+                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                  const redirected = new URL(res.headers.location, url).toString();
+                  res.resume();
+                  return resolve(getText(redirected, redirects + 1));
+                }
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                  res.resume();
+                  return reject(new Error(`HTTP ${res.statusCode}`));
+                }
+                let data = '';
+                res.on('data', c => data += c);
+                res.on('end', () => resolve(data));
+              });
+              req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error('Request timeout')));
+              req.on('error', e => {
+                const err = new Error(`Network error: ${redact(e.message)}`);
+                err.code = TRANSIENT_PATTERN.test(String(e.message)) ? 'CHEVRON_TRANSIENT_NETWORK' : 'CHEVRON_NETWORK_ERROR';
+                reject(err);
+              });
+            });
+          }
 
           function isRetryable(e) {
-            return e?.code === 'ALPHA_VANTAGE_RATE_LIMIT' || e?.code === 'ALPHA_VANTAGE_TRANSIENT_NETWORK';
+            return e?.code === 'ALPHA_VANTAGE_RATE_LIMIT' ||
+              e?.code === 'ALPHA_VANTAGE_TRANSIENT_NETWORK' ||
+              e?.code === 'CHEVRON_TRANSIENT_NETWORK';
           }
 
           async function withRetry(label, fn) {
@@ -190,6 +342,12 @@ jobs:
               if (!Number.isFinite(fx) || fx <= 0) return [];
               return [{ date, fx }];
             });
+          }
+          async function fetchLatestChevronDividend() {
+            const html = await getText(CHEVRON_DIVIDEND_URL);
+            const parsed = parseChevronLatestDividend(html);
+            if (!parsed) throw new Error('Could not parse latest dividend from Chevron page');
+            return parsed;
           }
 
           // ── Merge + join helpers ──────────────────────────────────────
@@ -242,6 +400,7 @@ jobs:
 
             const baseCvx = parseCvxCsv(fs.readFileSync(BASELINE_CVX_CSV, 'utf8'));
             const baseFx  = parseFxCsv(fs.readFileSync(BASELINE_FX_CSV,  'utf8'));
+            const existingLatestDividend = getExistingLatestDividend();
             console.log(`Baseline CVX: ${baseCvx.length} rows, FX: ${baseFx.length} rows`);
 
             let newCvx = [], newFx = [];
@@ -271,6 +430,17 @@ jobs:
 
             const data = buildOutput(mergedCvx, mergedFx);
             if (data.length === 0) throw new Error('No output rows after joining CVX and FX data');
+            let latestDividend = existingLatestDividend;
+            try {
+              latestDividend = await withRetry('CHEVRON_DIVIDEND', fetchLatestChevronDividend);
+              console.log(`Latest Chevron dividend: $${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
+            } catch (err) {
+              if (latestDividend) {
+                console.warn(`Chevron dividend fetch/parse issue, keeping previous latest_dividend metadata: ${err.message}`);
+              } else {
+                throw err;
+              }
+            }
 
             const first = data[0], last = data[data.length - 1];
             console.log(`Output: ${data.length} rows, range: ${first.date} → ${last.date}`);
@@ -284,8 +454,14 @@ jobs:
                 fx_pair: 'AUD/USD',
                 schedule: 'daily',
                 baseline_cvx: 'cvx_us_d.csv',
-                baseline_fx: 'DEXUSAL.csv'
+                baseline_fx: 'DEXUSAL.csv',
+                dividend_source_url: CHEVRON_DIVIDEND_URL
               },
+              latest_dividend: latestDividend ? {
+                amount: latestDividend.amount,
+                record_date: latestDividend.record_date,
+                payment_date: latestDividend.payment_date
+              } : null,
               data
             }), 'utf8');
             console.log('data.json written');
