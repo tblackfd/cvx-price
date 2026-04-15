@@ -877,11 +877,13 @@
   // data.json shape: {
   //   updated: ISO string,
   //   latest_dividend: { amount, record_date, payment_date } | null,
-  //   data: [{ date, open, high, low, close, volume, fx, aud_close, dividend }]
+  //   dividends: [{ amount, record_date, payment_date, ... }],
+  //   data: [{ date, open, high, low, close, volume, fx, aud_close }]
   // }
 
   let cachedRows = null; // full dataset from data.json
   let cachedLatestDividend = null; // { amount, recordDate, paymentDate } from latest_dividend
+  let cachedDividends = []; // normalized dividend events from dividends[]
   let earliestAvailableDate = null;
 
   function parseLatestDividendMeta(raw) {
@@ -894,9 +896,19 @@
     if (Number.isNaN(recordDate.getTime()) || Number.isNaN(paymentDate.getTime())) return null;
     return { amount, recordDate, paymentDate };
   }
+  function parseDividendEvents(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map(parseLatestDividendMeta)
+      .filter(Boolean)
+      .sort((a, b) => {
+        if (a.paymentDate.getTime() !== b.paymentDate.getTime()) return a.paymentDate - b.paymentDate;
+        return a.recordDate - b.recordDate;
+      });
+  }
 
   async function loadAllData(forceRefresh = false) {
-    if (cachedRows && !forceRefresh) return { rows: cachedRows, updated: null, latestDividend: cachedLatestDividend };
+    if (cachedRows && !forceRefresh) return { rows: cachedRows, updated: null, latestDividend: cachedLatestDividend, dividends: cachedDividends };
     earliestAvailableDate = null;
     const cacheBuster = forceRefresh ? `?t=${Date.now()}` : '';
     const r = await fetch(`data.json${cacheBuster}`, {
@@ -922,10 +934,6 @@
         aud_close: Number.isFinite(Number(d.aud_close)) && Number(d.aud_close) > 0
           ? Number(d.aud_close)
           : (Number.isFinite(Number(d.aud)) && Number(d.aud) > 0 ? Number(d.aud) : null),
-        // dividend amount per share in USD
-        dividend: Number.isFinite(Number(d.dividend)) && Number(d.dividend) >= 0
-          ? Number(d.dividend)
-          : (Number.isFinite(Number(d.dividend_amount)) && Number(d.dividend_amount) >= 0 ? Number(d.dividend_amount) : 0),
       };
     }).filter(d => (
       Number.isFinite(d.open) &&
@@ -936,8 +944,9 @@
       d.fx != null &&
       d.aud_close != null
     ));
-    cachedLatestDividend = parseLatestDividendMeta(json.latest_dividend);
-    return { rows: cachedRows, updated: json.updated, latestDividend: cachedLatestDividend };
+    cachedDividends = parseDividendEvents(json.dividends);
+    cachedLatestDividend = parseLatestDividendMeta(json.latest_dividend) || (cachedDividends.length ? cachedDividends[cachedDividends.length - 1] : null);
+    return { rows: cachedRows, updated: json.updated, latestDividend: cachedLatestDividend, dividends: cachedDividends };
   }
 
   // ── Main load ─────────────────────────────────────────────────────
@@ -1024,10 +1033,10 @@
       el('statDividend').textContent = `${(latestDividendMeta.amount * 100).toFixed(1)}¢`;
       el('statDividendDate').textContent = `Record ${fmtDate(latestDividendMeta.recordDate)} • Paid ${fmtDate(latestDividendMeta.paymentDate)}`;
     } else {
-      const latestDividend = [...(cachedRows || [])].reverse().find(d => Number.isFinite(d.dividend) && d.dividend > 0);
+      const latestDividend = cachedDividends.length ? cachedDividends[cachedDividends.length - 1] : null;
       if (latestDividend) {
-        el('statDividend').textContent = `${(latestDividend.dividend * 100).toFixed(1)}¢`;
-        el('statDividendDate').textContent = fmtDate(latestDividend.date);
+        el('statDividend').textContent = `${(latestDividend.amount * 100).toFixed(1)}¢`;
+        el('statDividendDate').textContent = `Record ${fmtDate(latestDividend.recordDate)} • Paid ${fmtDate(latestDividend.paymentDate)}`;
       } else {
         el('statDividend').textContent = '—';
         el('statDividendDate').textContent = 'No dividend data';

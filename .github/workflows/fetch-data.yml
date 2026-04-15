@@ -21,6 +21,7 @@ jobs:
         run: |
           node - <<'EOF'
           const https = require('https');
+          const zlib = require('zlib');
           const fs = require('fs');
           const path = require('path');
 
@@ -34,8 +35,10 @@ jobs:
           if (!API_KEY) throw new Error('Missing ALPHA_VANTAGE_KEY secret');
 
           const REQUEST_TIMEOUT_MS  = 30000;
-          const RETRY_ATTEMPTS      = 3;
+          const GCS_REQUEST_TIMEOUT_MS = 90000;
+          const RETRY_ATTEMPTS      = 5;
           const RETRY_BASE_DELAY_MS = 1500;
+          const RETRY_JITTER_MS     = 500;
           const MIN_PLAUSIBLE_DIVIDEND = 0;
           const MAX_PLAUSIBLE_DIVIDEND = 10;
           const RATE_LIMIT_PATTERN  = /rate limit|premium endpoint|free API requests|requests per day|requests per second|spreading out/i;
@@ -53,6 +56,46 @@ jobs:
           }
           function isPlausibleDividendAmount(v) {
             return Number.isFinite(v) && v > MIN_PLAUSIBLE_DIVIDEND && v < MAX_PLAUSIBLE_DIVIDEND;
+          }
+          function previewText(v, max = 220) {
+            return String(v || '').replace(/\s+/g, ' ').trim().slice(0, max);
+          }
+          function timingSummary(startedAt, marks = {}) {
+            const end = marks.end || Date.now();
+            const value = (k) => marks[k] ? `${marks[k] - startedAt}ms` : 'n/a';
+            return `total=${end - startedAt}ms socket=${value('socket')} dns=${value('lookup')} tcp=${value('connect')} tls=${value('secureConnect')} ttfb=${value('response')} download=${marks.response ? `${end - marks.response}ms` : 'n/a'}`;
+          }
+          function normalizeDividendEvent(raw, source = null) {
+            if (!isObj(raw)) return null;
+            const amount = parseCurrency(raw.amount);
+            const recordDate = normalizeDateToken(raw.record_date);
+            const paymentDate = normalizeDateToken(raw.payment_date);
+            const declaredDate = normalizeDateToken(raw.declared_date);
+            if (!isPlausibleDividendAmount(amount)) return null;
+            if (!validDate(recordDate) || !validDate(paymentDate) || paymentDate < recordDate) return null;
+            const out = {
+              amount,
+              record_date: recordDate,
+              payment_date: paymentDate
+            };
+            if (validDate(declaredDate)) out.declared_date = declaredDate;
+            if (typeof raw.type === 'string' && raw.type.trim()) out.type = raw.type.trim();
+            if (typeof raw.source === 'string' && raw.source.trim()) out.source = raw.source.trim();
+            else if (typeof source === 'string' && source.trim()) out.source = source.trim();
+            return out;
+          }
+          function dedupeAndSortDividendEvents(events) {
+            const map = new Map();
+            for (const e of events) {
+              if (!e) continue;
+              const key = `${e.record_date}|${e.payment_date}|${e.amount.toFixed(6)}|${e.declared_date || ''}|${(e.type || '').toLowerCase()}`;
+              map.set(key, e);
+            }
+            return Array.from(map.values()).sort((a, b) => {
+              if (a.payment_date !== b.payment_date) return a.payment_date.localeCompare(b.payment_date);
+              if (a.record_date !== b.record_date) return a.record_date.localeCompare(b.record_date);
+              return (a.declared_date || '').localeCompare(b.declared_date || '');
+            });
           }
 
           function validDate(d) {
@@ -181,18 +224,21 @@ jobs:
             });
             return { rows, latest: rows[rows.length - 1] };
           }
-          function getExistingLatestDividend() {
-            if (!fs.existsSync(OUTPUT_JSON)) return null;
+          function getExistingDividendState() {
+            if (!fs.existsSync(OUTPUT_JSON)) return { latestDividend: null, dividends: [] };
             try {
               const existing = JSON.parse(fs.readFileSync(OUTPUT_JSON, 'utf8'));
-              const d = existing?.latest_dividend;
-              if (!d) return null;
-              const amount = parseNum(d.amount);
-              if (!Number.isFinite(amount) || amount <= 0) return null;
-              if (!validDate(d.record_date) || !validDate(d.payment_date)) return null;
-              return { amount, record_date: d.record_date, payment_date: d.payment_date };
+              const latestDividend = normalizeDividendEvent(existing?.latest_dividend, 'previous');
+              const dividends = dedupeAndSortDividendEvents(
+                (Array.isArray(existing?.dividends) ? existing.dividends : [])
+                  .map(d => normalizeDividendEvent(d, d?.source || 'previous'))
+              );
+              return {
+                latestDividend: latestDividend || (dividends.length ? dividends[dividends.length - 1] : null),
+                dividends
+              };
             } catch {
-              return null;
+              return { latestDividend: null, dividends: [] };
             }
           }
 
@@ -204,8 +250,7 @@ jobs:
             const h = lines[0].split(',');
             const i = {
               date: h.indexOf('Date'), open: h.indexOf('Open'), high: h.indexOf('High'),
-              low: h.indexOf('Low'), close: h.indexOf('Close'), volume: h.indexOf('Volume'),
-              dividend: h.indexOf('Dividend')
+              low: h.indexOf('Low'), close: h.indexOf('Close'), volume: h.indexOf('Volume')
             };
             // Dividend column is optional for backward compatibility with existing baseline CSV snapshots.
             if ([i.date, i.open, i.high, i.low, i.close, i.volume].some(x => x < 0)) {
@@ -218,11 +263,10 @@ jobs:
               const open = parseNum(c[i.open]), high = parseNum(c[i.high]);
               const low = parseNum(c[i.low]), close = parseNum(c[i.close]);
               const volume = parseNum(c[i.volume]);
-              const dividend = i.dividend >= 0 ? parseNum(c[i.dividend]) : 0;
               if (!date || !validDate(date)) continue;
               if (![open, high, low, close].every(v => Number.isFinite(v) && v > 0)) continue;
               if (!Number.isFinite(volume) || volume <= 0) continue;
-              rows.push({ date, open, high, low, close, volume, dividend: Number.isFinite(dividend) && dividend >= 0 ? dividend : 0 });
+              rows.push({ date, open, high, low, close, volume });
             }
             return rows;
           }
@@ -246,8 +290,8 @@ jobs:
           }
 
           function toCvxCsv(rows) {
-            return 'Date,Open,High,Low,Close,Volume,Dividend\n' +
-              rows.map(r => `${r.date},${r.open},${r.high},${r.low},${r.close},${r.volume},${Number.isFinite(r.dividend) ? r.dividend : 0}`).join('\n') + '\n';
+            return 'Date,Open,High,Low,Close,Volume\n' +
+              rows.map(r => `${r.date},${r.open},${r.high},${r.low},${r.close},${r.volume}`).join('\n') + '\n';
           }
 
           function toFxCsv(rows) {
@@ -288,9 +332,11 @@ jobs:
               });
             });
           }
-          function getText(url, redirects = 0) {
+          function getText(url, { redirects = 0, timeoutMs = REQUEST_TIMEOUT_MS, logLabel = 'GET_TEXT' } = {}) {
             return new Promise((resolve, reject) => {
               if (redirects > 5) return reject(new Error('Too many redirects'));
+              const startedAt = Date.now();
+              const marks = {};
               const req = https.get(url, { headers: {
                 'User-Agent': HTTP_USER_AGENT,
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -302,27 +348,45 @@ jobs:
                 if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                   const redirected = new URL(res.headers.location, url).toString();
                   res.resume();
-                  return resolve(getText(redirected, redirects + 1));
+                  console.log(`${logLabel} redirect ${url} -> ${redirected}`);
+                  return resolve(getText(redirected, { redirects: redirects + 1, timeoutMs, logLabel }));
                 }
+                marks.response = Date.now();
                 if (res.statusCode < 200 || res.statusCode >= 300) {
                   let body = '';
                   res.on('data', c => { if (body.length < 300) body += c.toString(); });
                   res.on('end', () => {
+                    marks.end = Date.now();
                     const diagKeys = ['server', 'via', 'cf-ray', 'x-akamai-session-id', 'x-cache', 'set-cookie'];
                     const diagHeaders = Object.fromEntries(diagKeys.map(h => [h, res.headers[h]]).filter(([, v]) => v !== undefined));
-                    console.warn(`getText ${res.statusCode} ${url} diag_headers=${JSON.stringify(diagHeaders)} body_preview=${body.slice(0, 200)}`);
+                    console.warn(`${logLabel} HTTP ${res.statusCode} ${url} timing=${timingSummary(startedAt, marks)} diag_headers=${JSON.stringify(diagHeaders)} body_preview=${previewText(body, 200)}`);
                     reject(new Error(`HTTP ${res.statusCode}`));
                   });
                   return;
                 }
                 let data = '';
                 res.on('data', c => data += c);
-                res.on('end', () => resolve(data));
+                res.on('end', () => {
+                  marks.end = Date.now();
+                  console.log(`${logLabel} success ${url} timing=${timingSummary(startedAt, marks)} bytes=${Buffer.byteLength(data, 'utf8')}`);
+                  resolve(data);
+                });
               });
-              req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error('Request timeout')));
+              req.on('socket', socket => {
+                marks.socket = Date.now();
+                socket.on('lookup', () => { if (!marks.lookup) marks.lookup = Date.now(); });
+                socket.on('connect', () => { if (!marks.connect) marks.connect = Date.now(); });
+                socket.on('secureConnect', () => { if (!marks.secureConnect) marks.secureConnect = Date.now(); });
+              });
+              req.setTimeout(timeoutMs, () => {
+                const stage = marks.response ? 'response_download' : (marks.secureConnect ? 'waiting_ttfb' : (marks.connect ? 'tls_handshake' : (marks.lookup ? 'tcp_connect' : 'dns_or_connect')));
+                req.destroy(new Error(`Request timeout after ${timeoutMs}ms during ${stage}`));
+              });
               req.on('error', e => {
+                marks.end = Date.now();
                 const err = new Error(`Network error: ${redact(e.message)}`);
                 err.code = TRANSIENT_PATTERN.test(String(e.message)) ? 'CHEVRON_TRANSIENT_NETWORK' : 'CHEVRON_NETWORK_ERROR';
+                console.warn(`${logLabel} error ${url} timing=${timingSummary(startedAt, marks)} message=${err.message}`);
                 reject(err);
               });
             });
@@ -331,7 +395,8 @@ jobs:
           function isRetryable(e) {
             return e?.code === 'ALPHA_VANTAGE_RATE_LIMIT' ||
               e?.code === 'ALPHA_VANTAGE_TRANSIENT_NETWORK' ||
-              e?.code === 'CHEVRON_TRANSIENT_NETWORK';
+              e?.code === 'CHEVRON_TRANSIENT_NETWORK' ||
+              e?.code === 'NASDAQ_TRANSIENT_NETWORK';
           }
 
           async function withRetry(label, fn) {
@@ -340,7 +405,7 @@ jobs:
               try { return await fn(); } catch (e) {
                 last = e;
                 if (!isRetryable(e) || a === RETRY_ATTEMPTS) break;
-                const wait = RETRY_BASE_DELAY_MS * a;
+                const wait = Math.floor((RETRY_BASE_DELAY_MS * (2 ** (a - 1))) + (Math.random() * RETRY_JITTER_MS));
                 console.warn(`${label} attempt ${a} failed (${e.message}). Retrying in ${wait}ms…`);
                 await sleep(wait);
               }
@@ -351,20 +416,18 @@ jobs:
           // outputsize=compact gives last ~100 trading days — sufficient for daily
           // incremental updates against the CSV baselines.
           async function fetchCvxRows() {
-            const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
+            const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
             const json = await getJson(url);
             const series = json['Time Series (Daily)'];
             if (!isObj(series)) throw new Error(`Missing CVX time series${json['Information'] ? ': ' + redact(json['Information']) : ''}`);
             return Object.entries(series).flatMap(([date, v]) => {
               if (!isObj(v) || !validDate(date)) return [];
-              const adjClose = Number(v['5. adjusted close']);
-              const close    = Number.isFinite(adjClose) && adjClose > 0 ? adjClose : Number(v['4. close']);
+              const close = Number(v['4. close']);
               const open = Number(v['1. open']), high = Number(v['2. high']);
-              const low  = Number(v['3. low']),  volume = Number(v['6. volume']);
-              const dividend = Number(v['7. dividend amount']);
+              const low  = Number(v['3. low']),  volume = Number(v['5. volume']);
               if (![open, high, low, close].every(x => Number.isFinite(x) && x > 0)) return [];
               if (!Number.isFinite(volume) || volume <= 0) return [];
-              return [{ date, open, high, low, close, volume, dividend: Number.isFinite(dividend) && dividend >= 0 ? dividend : 0 }];
+              return [{ date, open, high, low, close, volume }];
             });
           }
 
@@ -381,38 +444,77 @@ jobs:
             });
           }
           async function fetchLatestGcsWebDividend() {
-            const html = await getText(GCS_WEB_DIVIDEND_URL);
+            const html = await getText(GCS_WEB_DIVIDEND_URL, { timeoutMs: GCS_REQUEST_TIMEOUT_MS, logLabel: 'GCS_WEB_DIVIDEND' });
             const parsed = parseLatestGcsWebDividend(html);
             if (!parsed.latest) throw new Error('Could not parse latest dividend from GCS-web page');
             console.log(`GCS-web parsed ${parsed.rows.length} dividend rows`);
-            return parsed.latest;
+            return parsed;
           }
 
           async function fetchNasdaqDividend() {
             const NASDAQ_CVX_URL = 'https://api.nasdaq.com/api/quote/CVX/dividends?assetclass=stocks';
-            const json = await new Promise((resolve, reject) => {
+            const response = await new Promise((resolve, reject) => {
+              const startedAt = Date.now();
+              const marks = {};
               const req = https.get(NASDAQ_CVX_URL, { headers: {
                 'User-Agent': HTTP_USER_AGENT,
                 'Accept': 'application/json, text/plain, */*',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': 'https://www.nasdaq.com/'
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Origin': 'https://www.nasdaq.com',
+                'Referer': 'https://www.nasdaq.com/',
+                'Connection': 'keep-alive'
               } }, res => {
-                let data = '';
-                res.on('data', c => data += c);
+                marks.response = Date.now();
+                const chunks = [];
+                res.on('data', c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
                 res.on('end', () => {
-                  if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-                    return reject(new Error(`HTTP ${res.statusCode}`));
+                  marks.end = Date.now();
+                  let bodyBuffer = Buffer.concat(chunks);
+                  const encoding = String(res.headers['content-encoding'] || '').toLowerCase();
+                  try {
+                    if (encoding.includes('br')) bodyBuffer = zlib.brotliDecompressSync(bodyBuffer);
+                    else if (encoding.includes('gzip')) bodyBuffer = zlib.gunzipSync(bodyBuffer);
+                    else if (encoding.includes('deflate')) bodyBuffer = zlib.inflateSync(bodyBuffer);
+                  } catch (decompressErr) {
+                    return reject(new Error(`NASDAQ decompress error (${encoding || 'identity'}): ${decompressErr.message}`));
                   }
-                  try { resolve(JSON.parse(data)); } catch (e) {
-                    reject(new Error(`JSON parse error: ${e.message}`));
+                  const bodyText = bodyBuffer.toString('utf8');
+                  const status = Number(res.statusCode || 0);
+                  const contentType = String(res.headers['content-type'] || '');
+                  console.log(`NASDAQ_DIVIDEND response status=${status} content_type=${contentType || 'n/a'} content_encoding=${encoding || 'identity'} timing=${timingSummary(startedAt, marks)} bytes=${bodyBuffer.length}`);
+                  if (!status || status < 200 || status >= 300) {
+                    return reject(new Error(`HTTP ${status} content_type=${contentType || 'n/a'} body_preview=${previewText(bodyText)}`));
                   }
+                  resolve({ jsonText: bodyText, status, contentType });
                 });
               });
-              req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error('Request timeout')));
-              req.on('error', e => reject(new Error(`Network error: ${e.message}`)));
+              req.on('socket', socket => {
+                marks.socket = Date.now();
+                socket.on('lookup', () => { if (!marks.lookup) marks.lookup = Date.now(); });
+                socket.on('connect', () => { if (!marks.connect) marks.connect = Date.now(); });
+                socket.on('secureConnect', () => { if (!marks.secureConnect) marks.secureConnect = Date.now(); });
+              });
+              req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new Error(`Request timeout after ${REQUEST_TIMEOUT_MS}ms`)));
+              req.on('error', e => {
+                marks.end = Date.now();
+                const err = new Error(`Network error: ${e.message}`);
+                err.code = TRANSIENT_PATTERN.test(String(e.message)) ? 'NASDAQ_TRANSIENT_NETWORK' : 'NASDAQ_NETWORK_ERROR';
+                console.warn(`NASDAQ_DIVIDEND error timing=${timingSummary(startedAt, marks)} message=${err.message}`);
+                reject(err);
+              });
             });
+            let json;
+            try {
+              json = JSON.parse(response.jsonText);
+            } catch (e) {
+              throw new Error(`NASDAQ JSON parse error: ${e.message}. status=${response.status} content_type=${response.contentType || 'n/a'} body_preview=${previewText(response.jsonText)}`);
+            }
             const rows = json?.data?.dividends?.rows;
-            if (!Array.isArray(rows) || rows.length === 0) throw new Error('No NASDAQ dividend rows');
+            if (!Array.isArray(rows) || rows.length === 0) {
+              console.warn(`NASDAQ_DIVIDEND empty rows status=${response.status} content_type=${response.contentType || 'n/a'} body_preview=${previewText(response.jsonText)}`);
+              throw new Error(`No NASDAQ dividend rows (status=${response.status})`);
+            }
             const parsedRows = [];
             for (let i = 0; i < rows.length; i++) {
               const row = rows[i] || {};
@@ -433,11 +535,13 @@ jobs:
               parsedRows.push({
                 row_index: i,
                 amount,
+                declared_date: declaredDate || null,
                 record_date: normalizedRecordDate,
                 payment_date: normalizedPaymentDate,
                 selected_date: selectedDate,
                 selected_date_source: dateSource,
-                raw_payment_date: paymentDate || null
+                raw_payment_date: paymentDate || null,
+                source: 'nasdaq'
               });
             }
             if (parsedRows.length === 0) throw new Error('Could not parse NASDAQ dividend rows');
@@ -458,7 +562,7 @@ jobs:
             } else {
               console.warn('NASDAQ self-check: no rows had paymentDate; selected latest row using record/declared/exDate fallback');
             }
-            return selected;
+            return { latest: selected, rows: parsedRows };
           }
 
           // ── Merge + join helpers ──────────────────────────────────────
@@ -496,8 +600,7 @@ jobs:
                 open: row.open, high: row.high, low: row.low,
                 close: row.close, volume: row.volume,
                 fx,
-                aud_close: row.close / fx,
-                dividend: Number.isFinite(row.dividend) && row.dividend >= 0 ? row.dividend : 0
+                aud_close: row.close / fx
               });
             }
             return result;
@@ -511,7 +614,7 @@ jobs:
 
             const baseCvx = parseCvxCsv(fs.readFileSync(BASELINE_CVX_CSV, 'utf8'));
             const baseFx  = parseFxCsv(fs.readFileSync(BASELINE_FX_CSV,  'utf8'));
-            const existingLatestDividend = getExistingLatestDividend();
+            const existingDividendState = getExistingDividendState();
             console.log(`Baseline CVX: ${baseCvx.length} rows, FX: ${baseFx.length} rows`);
 
             let newCvx = [], newFx = [];
@@ -541,19 +644,26 @@ jobs:
 
             const data = buildOutput(mergedCvx, mergedFx);
             if (data.length === 0) throw new Error('No output rows after joining CVX and FX data');
-            let latestDividend = existingLatestDividend;
-            let latestDividendSource = existingLatestDividend ? 'previous' : 'none';
+            let latestDividend = existingDividendState.latestDividend;
+            let dividends = existingDividendState.dividends;
+            let latestDividendSource = latestDividend ? 'previous' : 'none';
+            let dividendFetchFailed = false;
             try {
-              latestDividend = await withRetry('GCS_WEB_DIVIDEND', fetchLatestGcsWebDividend);
+              const gcsResult = await withRetry('GCS_WEB_DIVIDEND', fetchLatestGcsWebDividend);
+              dividends = dedupeAndSortDividendEvents(gcsResult.rows.map(r => normalizeDividendEvent({ ...r, source: 'gcs-web' }, 'gcs-web')));
+              latestDividend = normalizeDividendEvent({ ...gcsResult.latest, source: 'gcs-web' }, 'gcs-web');
               latestDividendSource = 'gcs-web';
-              console.log(`Dividend source=GCS-web amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
+              console.log(`Dividend source=GCS-web amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date} rows=${dividends.length}`);
             } catch (err) {
               console.warn(`GCS-web dividend fetch/parse issue: ${err.message}. Trying NASDAQ fallback…`);
               try {
-                latestDividend = await fetchNasdaqDividend();
+                const nasdaqResult = await withRetry('NASDAQ_DIVIDEND', fetchNasdaqDividend);
+                dividends = dedupeAndSortDividendEvents(nasdaqResult.rows.map(r => normalizeDividendEvent(r, 'nasdaq')));
+                latestDividend = normalizeDividendEvent(nasdaqResult.latest, 'nasdaq');
                 latestDividendSource = 'nasdaq';
-                console.log(`Dividend source=NASDAQ row=${latestDividend.row_index} selected_date=${latestDividend.selected_date} selected_by=${latestDividend.selected_date_source} amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
+                console.log(`Dividend source=NASDAQ row=${nasdaqResult.latest.row_index} selected_date=${nasdaqResult.latest.selected_date} selected_by=${nasdaqResult.latest.selected_date_source} amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date} rows=${dividends.length}`);
               } catch (err2) {
+                dividendFetchFailed = true;
                 if (latestDividend) {
                   latestDividendSource = 'previous';
                   console.warn(`NASDAQ fallback also failed (${err2.message}), keeping previous latest_dividend metadata`);
@@ -561,12 +671,15 @@ jobs:
                   latestDividendSource = 'none';
                   console.warn(`All dividend sources failed (${err2.message}), setting latest_dividend to null`);
                   latestDividend = null;
+                  dividends = [];
                 }
               }
             }
+            if (!latestDividend && dividends.length > 0) latestDividend = dividends[dividends.length - 1];
             if (latestDividend) {
               const payDays = Math.floor((Date.now() - new Date(`${latestDividend.payment_date}T00:00:00Z`).getTime()) / 86400000);
               if (payDays > 120) console.warn(`Dividend metadata may be stale: payment_date=${latestDividend.payment_date} is ${payDays} days old`);
+              if (dividendFetchFailed && payDays > 90) console.warn(`Dividend fetch failed and fallback latest_dividend is stale (${payDays} days old).`);
               console.log(`Dividend final source=${latestDividendSource} amount=$${latestDividend.amount} record=${latestDividend.record_date} payment=${latestDividend.payment_date}`);
             } else {
               console.log(`Dividend final source=${latestDividendSource} latest_dividend=null`);
@@ -577,22 +690,27 @@ jobs:
             console.log(`Latest: close=${last.close} USD, fx=${last.fx} AUD/USD, aud_close=${last.aud_close.toFixed(2)} AUD`);
 
             fs.writeFileSync(OUTPUT_JSON, JSON.stringify({
+              schema_version: 2,
               updated: new Date().toISOString(),
               source: {
                 provider: 'alphavantage',
+                cvx_function: 'TIME_SERIES_DAILY',
+                fx_function: 'FX_DAILY',
                 cvx_symbol: 'CVX',
                 fx_pair: 'AUD/USD',
                 schedule: 'daily',
                 baseline_cvx: 'cvx_us_d.csv',
                 baseline_fx: 'DEXUSAL.csv',
                 dividend_source_url: GCS_WEB_DIVIDEND_URL,
-                dividend_fallback_source_url: 'https://api.nasdaq.com/api/quote/CVX/dividends?assetclass=stocks'
+                dividend_fallback_source_url: 'https://api.nasdaq.com/api/quote/CVX/dividends?assetclass=stocks',
+                dividend_source: latestDividendSource
               },
               latest_dividend: latestDividend ? {
                 amount: latestDividend.amount,
                 record_date: latestDividend.record_date,
                 payment_date: latestDividend.payment_date
               } : null,
+              dividends,
               data
             }), 'utf8');
             console.log('data.json written');
