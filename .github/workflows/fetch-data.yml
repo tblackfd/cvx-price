@@ -133,15 +133,15 @@ jobs:
               .map(([date, v]) => ({ date, usd: isPlainObject(v) ? selectUSD(v) : null }))
               .filter(row => row.usd !== null);
 
-            const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=CVX&outputsize=full&apikey=${API_KEY}`;
+            const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=CVX&outputsize=full&apikey=${API_KEY}`;
             const dailyJson = await getJson(dailyUrl);
             const dailySeries = dailyJson['Time Series (Daily)'];
             if (!isPlainObject(dailySeries)) {
               const dailyInfo = dailyJson['Information'];
               throw new Error(
                 dailyInfo
-                  ? `Missing CVX series from daily endpoint: ${dailyInfo}`
-                  : 'Missing CVX series from daily endpoint'
+                  ? `Missing CVX series from daily-adjusted endpoint: ${dailyInfo}`
+                  : 'Missing CVX series from daily-adjusted endpoint'
               );
             }
 
