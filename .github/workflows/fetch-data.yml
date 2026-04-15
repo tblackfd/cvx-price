@@ -133,7 +133,7 @@ jobs:
               .map(([date, v]) => ({ date, usd: isPlainObject(v) ? selectUSD(v) : null }))
               .filter(row => row.usd !== null);
 
-            const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=CVX&outputsize=compact&apikey=${API_KEY}`;
+            const dailyUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=CVX&outputsize=full&apikey=${API_KEY}`;
             const dailyJson = await getJson(dailyUrl);
             const dailySeries = dailyJson['Time Series (Daily)'];
             if (!isPlainObject(dailySeries)) {
@@ -151,7 +151,7 @@ jobs:
           }
 
           async function fetchFX() {
-            const url = `https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=AUD&to_symbol=USD&outputsize=compact&apikey=${API_KEY}`;
+            const url = `https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=AUD&to_symbol=USD&outputsize=full&apikey=${API_KEY}`;
             const json = await getJson(url);
  
             const series = json['Time Series FX (Daily)'];
