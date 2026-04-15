@@ -881,7 +881,7 @@
   // }
 
   let cachedRows = null; // full dataset from data.json
-  let cachedLatestDividend = null; // { amount, record_date, payment_date } from latest_dividend
+  let cachedLatestDividend = null; // { amount, recordDate, paymentDate } from latest_dividend
   let earliestAvailableDate = null;
 
   function parseLatestDividendMeta(raw) {
@@ -892,7 +892,7 @@
     const recordDate = parseIsoDateAsLocal(raw.record_date);
     const paymentDate = parseIsoDateAsLocal(raw.payment_date);
     if (Number.isNaN(recordDate.getTime()) || Number.isNaN(paymentDate.getTime())) return null;
-    return { amount, record_date: recordDate, payment_date: paymentDate };
+    return { amount, recordDate, paymentDate };
   }
 
   async function loadAllData(forceRefresh = false) {
@@ -1022,7 +1022,7 @@
 
     if (latestDividendMeta) {
       el('statDividend').textContent = `${(latestDividendMeta.amount * 100).toFixed(1)}¢`;
-      el('statDividendDate').textContent = `Record ${fmtDate(latestDividendMeta.record_date)} • Paid ${fmtDate(latestDividendMeta.payment_date)}`;
+      el('statDividendDate').textContent = `Record ${fmtDate(latestDividendMeta.recordDate)} • Paid ${fmtDate(latestDividendMeta.paymentDate)}`;
     } else {
       const latestDividend = [...(cachedRows || [])].reverse().find(d => Number.isFinite(d.dividend) && d.dividend > 0);
       if (latestDividend) {

@@ -28,6 +28,7 @@ jobs:
           const BASELINE_FX_CSV  = path.resolve('DEXUSAL.csv');
           const OUTPUT_JSON      = path.resolve('data.json');
           const CHEVRON_DIVIDEND_URL = 'https://www.chevron.com/investors/stock-and-dividend';
+          const HTTP_USER_AGENT = 'cvx-price-data-fetcher/1.0';
 
           const API_KEY = process.env.ALPHA_VANTAGE_KEY;
           if (!API_KEY) throw new Error('Missing ALPHA_VANTAGE_KEY secret');
@@ -79,7 +80,7 @@ jobs:
               .replace(/&lt;/gi, '<')
               .replace(/&gt;/gi, '>');
           }
-          function extractDateTokens(text) {
+          function extractDateCandidates(text) {
             const out = [];
             const patterns = [
               /\b\d{4}-\d{2}-\d{2}\b/g,
@@ -87,10 +88,44 @@ jobs:
               /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\b/gi
             ];
             for (const p of patterns) {
-              const matches = text.match(p) || [];
-              for (const m of matches) out.push(m);
+              p.lastIndex = 0;
+              let m;
+              while ((m = p.exec(text)) !== null) {
+                const normalized = normalizeDateToken(m[0]);
+                if (!validDate(normalized)) continue;
+                out.push({ raw: m[0], normalized, index: m.index });
+              }
             }
+            out.sort((a, b) => a.index - b.index);
             return out;
+          }
+          function pickRecordAndPaymentDates(text) {
+            const candidates = extractDateCandidates(text);
+            if (candidates.length < 2) return null;
+            const lower = text.toLowerCase();
+            const dateNearKeyword = (keywordPattern) => {
+              for (const c of candidates) {
+                const start = Math.max(0, c.index - 40);
+                const end = Math.min(text.length, c.index + c.raw.length + 40);
+                const snippet = lower.slice(start, end);
+                if (keywordPattern.test(snippet)) return c.normalized;
+              }
+              return null;
+            };
+            let record = dateNearKeyword(/\brecord\b/);
+            let payment = dateNearKeyword(/\bpayment\b|\bpayable\b/);
+            if (!record || !payment) {
+              record = record || candidates[candidates.length - 2].normalized;
+              payment = payment || candidates[candidates.length - 1].normalized;
+            }
+            if (!validDate(record) || !validDate(payment)) return null;
+            if (payment < record) {
+              const unique = Array.from(new Set(candidates.map(c => c.normalized))).sort((a, b) => a.localeCompare(b));
+              if (unique.length < 2) return null;
+              record = unique[unique.length - 2];
+              payment = unique[unique.length - 1];
+            }
+            return payment >= record ? { record_date: record, payment_date: payment } : null;
           }
           function parseChevronLatestDividend(html) {
             const rows = [];
@@ -101,10 +136,9 @@ jobs:
               if (!text) continue;
               const amountMatch = text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
               const amount = amountMatch ? parseCurrency(amountMatch[0]) : null;
-              const dates = extractDateTokens(text).map(normalizeDateToken).filter(validDate);
-              if (!Number.isFinite(amount) || amount <= 0 || dates.length < 2) continue;
-              const record_date = dates[dates.length - 2];
-              const payment_date = dates[dates.length - 1];
+              const dates = pickRecordAndPaymentDates(text);
+              if (!Number.isFinite(amount) || amount <= 0 || !dates) continue;
+              const { record_date, payment_date } = dates;
               if (!validDate(record_date) || !validDate(payment_date)) continue;
               rows.push({ amount, record_date, payment_date });
             }
@@ -114,13 +148,13 @@ jobs:
             }
             const text = decodeHtmlEntities(html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
             const amountMatch = text.match(/\$\s*([0-9]+(?:\.[0-9]+)?)/);
-            const allDates = extractDateTokens(text).map(normalizeDateToken).filter(validDate);
+            const dates = pickRecordAndPaymentDates(text);
             const amount = amountMatch ? parseCurrency(amountMatch[0]) : null;
-            if (!Number.isFinite(amount) || amount <= 0 || allDates.length < 2) return null;
+            if (!Number.isFinite(amount) || amount <= 0 || !dates) return null;
             return {
               amount,
-              record_date: allDates[allDates.length - 2],
-              payment_date: allDates[allDates.length - 1]
+              record_date: dates.record_date,
+              payment_date: dates.payment_date
             };
           }
           function getExistingLatestDividend() {
@@ -233,7 +267,7 @@ jobs:
           function getText(url, redirects = 0) {
             return new Promise((resolve, reject) => {
               if (redirects > 5) return reject(new Error('Too many redirects'));
-              const req = https.get(url, { headers: { 'User-Agent': 'cvx-price-data-fetcher/1.0', 'Accept': 'text/html,*/*;q=0.8' } }, res => {
+              const req = https.get(url, { headers: { 'User-Agent': HTTP_USER_AGENT, 'Accept': 'text/html,*/*;q=0.8' } }, res => {
                 if (!res.statusCode) return reject(new Error('Missing HTTP status code'));
                 if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                   const redirected = new URL(res.headers.location, url).toString();
