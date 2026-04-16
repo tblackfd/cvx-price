@@ -2,7 +2,8 @@ name: Update CVX Data
 
 on:
   schedule:
-    - cron: '30 0 * * *' # daily at 00:30 UTC (after NYSE close + Alpha Vantage update)
+    - cron: '17 1 * * *'  # daily at 01:17 UTC – primary run (off-peak minute reduces GitHub queue delays)
+    - cron: '17 7 * * *'  # daily at 07:17 UTC – backup run in case the primary was skipped/delayed
   workflow_dispatch:
 
 jobs:
@@ -853,6 +854,38 @@ jobs:
           }
 
           main().catch(err => { console.error(err); process.exit(1); });
+          EOF
+
+      - name: Check data.json freshness
+        run: |
+          node - <<'EOF'
+          const fs = require('fs');
+          const path = require('path');
+          const file = path.resolve('data.json');
+          const STALE_THRESHOLD_MS = 26 * 60 * 60 * 1000; // 26 hours
+          if (!fs.existsSync(file)) {
+            console.error('data.json does not exist');
+            process.exit(1);
+          }
+          let updated_at;
+          try {
+            const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+            updated_at = json.updated;
+          } catch (e) {
+            console.error(`Failed to parse data.json: ${e.message}`);
+            process.exit(1);
+          }
+          if (!updated_at) {
+            console.warn('Warning: data.json has no updated field – cannot verify freshness');
+            process.exit(0);
+          }
+          const age = Date.now() - new Date(updated_at).getTime();
+          const ageHours = (age / 3600000).toFixed(1);
+          if (age > STALE_THRESHOLD_MS) {
+            console.error(`data.json is stale: last updated ${ageHours}h ago (threshold: 26h). Possible schedule miss or data source failure.`);
+            process.exit(1);
+          }
+          console.log(`data.json freshness OK: last updated ${ageHours}h ago`);
           EOF
 
       - name: Commit updated data files
