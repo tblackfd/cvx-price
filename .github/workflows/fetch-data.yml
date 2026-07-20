@@ -170,8 +170,10 @@ jobs:
 
           const BASELINE_CVX_CSV = path.resolve('cvx_us_d.csv');
           const BASELINE_FX_CSV  = path.resolve('DEXUSAL.csv');
+          const BASELINE_WTI_CSV = path.resolve('DCOILWTICO.csv');
           const OUTPUT_JSON      = path.resolve('data.json');
           const GCS_WEB_DIVIDEND_URL = 'https://chevroncorp.gcs-web.com/stock-information/dividend-history';
+          const FRED_WTI_CSV_URL = 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=DCOILWTICO';
           const HTTP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
           const API_KEY = process.env.ALPHA_VANTAGE_KEY;
@@ -432,6 +434,24 @@ jobs:
             return rows;
           }
 
+          // Parses DCOILWTICO.csv (FRED format: DATE,DCOILWTICO)
+          // Missing-value rows are silently skipped.
+          function parseWtiCsv(text) {
+            const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+            if (lines.length < 2) return [];
+            const rows = [];
+            for (const line of lines.slice(1)) {
+              const [rawDate, rawVal] = line.split(',');
+              const date = (rawDate || '').trim();
+              const val  = (rawVal  || '').trim();
+              if (!date || !validDate(date) || !val || val === '.') continue;
+              const wti = parseNum(val);
+              if (!Number.isFinite(wti) || wti <= 0) continue;
+              rows.push({ date, wti });
+            }
+            return rows;
+          }
+
           function toCvxCsv(rows) {
             return 'Date,Open,High,Low,Close,Volume\n' +
               rows.map(r => `${r.date},${r.open},${r.high},${r.low},${r.close},${r.volume}`).join('\n') + '\n';
@@ -440,6 +460,11 @@ jobs:
           function toFxCsv(rows) {
             return 'observation_date,DEXUSAL\n' +
               rows.map(r => `${r.date},${r.fx}`).join('\n') + '\n';
+          }
+
+          function toWtiCsv(rows) {
+            return 'DATE,DCOILWTICO\n' +
+              rows.map(r => `${r.date},${r.wti}`).join('\n') + '\n';
           }
 
           // ── Alpha Vantage JSON fetch ──────────────────────────────────
@@ -586,6 +611,12 @@ jobs:
               return [{ date, fx }];
             });
           }
+          async function fetchWtiRows() {
+            const csv = await getText(FRED_WTI_CSV_URL, { timeoutMs: REQUEST_TIMEOUT_MS, logLabel: 'FRED_WTI' });
+            const rows = parseWtiCsv(csv);
+            if (rows.length === 0) throw new Error('Missing or invalid WTI rows from FRED DCOILWTICO');
+            return rows;
+          }
           async function fetchLatestGcsWebDividend() {
             const html = await getText(GCS_WEB_DIVIDEND_URL, { timeoutMs: GCS_REQUEST_TIMEOUT_MS, logLabel: 'GCS_WEB_DIVIDEND' });
             const parsed = parseLatestGcsWebDividend(html);
@@ -716,12 +747,13 @@ jobs:
             return Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
           }
 
-          // Join CVX and FX on date.  For trading days where FX has no entry
-          // (e.g. US federal holidays on which AUD markets still traded), carry
-          // forward the most-recent prior FX close.
-          function buildOutput(cvxRows, fxRows) {
+          // Join CVX with FX and WTI on date.  For trading days where FX/WTI
+          // has no entry, carry forward the most-recent prior close.
+          function buildOutput(cvxRows, fxRows, wtiRows) {
             const fxMap   = new Map(fxRows.map(r => [r.date, r.fx]));
             const fxDates = fxRows.map(r => r.date); // ascending
+            const wtiMap   = new Map(wtiRows.map(r => [r.date, r.wti]));
+            const wtiDates = wtiRows.map(r => r.date); // ascending
 
             function lookupFx(date) {
               if (fxMap.has(date)) return fxMap.get(date);
@@ -733,17 +765,32 @@ jobs:
               }
               return match ? fxMap.get(match) : null;
             }
+            function lookupWti(date) {
+              if (wtiMap.has(date)) return wtiMap.get(date);
+              let lo = 0, hi = wtiDates.length - 1, match = null;
+              while (lo <= hi) {
+                const mid = lo + Math.floor((hi - lo) / 2);
+                if (wtiDates[mid] <= date) { match = wtiDates[mid]; lo = mid + 1; }
+                else { hi = mid - 1; }
+              }
+              return match ? wtiMap.get(match) : null;
+            }
 
             const result = [];
             for (const row of cvxRows) {
               const fx = lookupFx(row.date);
-              if (fx == null) continue; // no FX coverage yet (pre-1999 dates)
+              const wti = lookupWti(row.date);
+              if (fx == null || wti == null || wti <= 0) continue; // no coverage yet
+              const cvxWtiRatio = row.close / wti;
+              if (!Number.isFinite(cvxWtiRatio) || cvxWtiRatio <= 0) continue;
               result.push({
                 date: row.date,
                 open: row.open, high: row.high, low: row.low,
                 close: row.close, volume: row.volume,
                 fx,
-                aud_close: row.close / fx
+                aud_close: row.close / fx,
+                wti,
+                cvx_wti_ratio: cvxWtiRatio
               });
             }
             return result;
@@ -754,25 +801,29 @@ jobs:
           async function main() {
             if (!fs.existsSync(BASELINE_CVX_CSV)) throw new Error('Missing cvx_us_d.csv');
             if (!fs.existsSync(BASELINE_FX_CSV))  throw new Error('Missing DEXUSAL.csv');
+            if (!fs.existsSync(BASELINE_WTI_CSV)) throw new Error('Missing DCOILWTICO.csv');
 
             const baseCvx = parseCvxCsv(fs.readFileSync(BASELINE_CVX_CSV, 'utf8'));
             const baseFx  = parseFxCsv(fs.readFileSync(BASELINE_FX_CSV,  'utf8'));
+            const baseWti = parseWtiCsv(fs.readFileSync(BASELINE_WTI_CSV, 'utf8'));
             const existingDividendState = getExistingDividendState();
-            console.log(`Baseline CVX: ${baseCvx.length} rows, FX: ${baseFx.length} rows`);
+            console.log(`Baseline CVX: ${baseCvx.length} rows, FX: ${baseFx.length} rows, WTI: ${baseWti.length} rows`);
 
-            let newCvx = [], newFx = [];
+            let newCvx = [], newFx = [], newWti = [];
             try {
               newCvx = await withRetry('CVX', fetchCvxRows);
               console.log(`Fetched ${newCvx.length} CVX rows from Alpha Vantage`);
               await sleep(12000); // 12s gap — AV free tier: max 5 calls/min
               newFx = await withRetry('FX', fetchFxRows);
               console.log(`Fetched ${newFx.length} FX rows from Alpha Vantage`);
+              newWti = await withRetry('FRED_WTI', fetchWtiRows);
+              console.log(`Fetched ${newWti.length} WTI rows from FRED`);
             } catch (err) {
               if (isRetryable(err)) {
-                if (baseCvx.length === 0 || baseFx.length === 0) {
-                  throw new Error(`Alpha Vantage issue with empty baseline data: ${err.message}`);
+                if (baseCvx.length === 0 || baseFx.length === 0 || baseWti.length === 0) {
+                  throw new Error(`Data source issue with empty baseline data: ${err.message}`);
                 }
-                console.warn(`Alpha Vantage issue, keeping baseline data: ${err.message}`);
+                console.warn(`Data source issue, keeping baseline data: ${err.message}`);
               } else {
                 throw err;
               }
@@ -780,13 +831,15 @@ jobs:
 
             const mergedCvx = mergeByDate(baseCvx, newCvx);
             const mergedFx  = mergeByDate(baseFx,  newFx);
-            console.log(`Merged CVX: ${mergedCvx.length} rows, FX: ${mergedFx.length} rows`);
+            const mergedWti = mergeByDate(baseWti, newWti);
+            console.log(`Merged CVX: ${mergedCvx.length} rows, FX: ${mergedFx.length} rows, WTI: ${mergedWti.length} rows`);
 
             fs.writeFileSync(BASELINE_CVX_CSV, toCvxCsv(mergedCvx), 'utf8');
             fs.writeFileSync(BASELINE_FX_CSV,  toFxCsv(mergedFx),  'utf8');
+            fs.writeFileSync(BASELINE_WTI_CSV, toWtiCsv(mergedWti), 'utf8');
 
-            const data = buildOutput(mergedCvx, mergedFx);
-            if (data.length === 0) throw new Error('No output rows after joining CVX and FX data');
+            const data = buildOutput(mergedCvx, mergedFx, mergedWti);
+            if (data.length === 0) throw new Error('No output rows after joining CVX, FX and WTI data');
             let latestDividend = existingDividendState.latestDividend;
             let dividends = existingDividendState.dividends;
             let latestDividendSource = latestDividend ? 'previous' : 'none';
@@ -851,7 +904,7 @@ jobs:
 
             const first = data[0], last = data[data.length - 1];
             console.log(`Output: ${data.length} rows, range: ${first.date} → ${last.date}`);
-            console.log(`Latest: close=${last.close} USD, fx=${last.fx} AUD/USD, aud_close=${last.aud_close.toFixed(2)} AUD`);
+            console.log(`Latest: close=${last.close} USD, fx=${last.fx} AUD/USD, aud_close=${last.aud_close.toFixed(2)} AUD, wti=${last.wti} USD, ratio=${last.cvx_wti_ratio.toFixed(4)}`);
 
             fs.writeFileSync(OUTPUT_JSON, JSON.stringify({
               schema_version: 2,
@@ -862,9 +915,13 @@ jobs:
                 fx_function: 'FX_DAILY',
                 cvx_symbol: 'CVX',
                 fx_pair: 'AUD/USD',
+                wti_provider: 'fred',
+                wti_series: 'DCOILWTICO',
                 schedule: 'daily',
                 baseline_cvx: 'cvx_us_d.csv',
                 baseline_fx: 'DEXUSAL.csv',
+                baseline_wti: 'DCOILWTICO.csv',
+                wti_source_url: FRED_WTI_CSV_URL,
                 dividend_source_url: GCS_WEB_DIVIDEND_URL,
                 dividend_fallback_source_url: 'https://api.nasdaq.com/api/quote/CVX/dividends?assetclass=stocks',
                 dividend_source: latestDividendSource
@@ -928,6 +985,6 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add cvx_us_d.csv DEXUSAL.csv data.json
+          git add cvx_us_d.csv DEXUSAL.csv DCOILWTICO.csv data.json
           git diff --staged --quiet || git commit -m "chore: update CVX data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push
