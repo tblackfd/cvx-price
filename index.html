@@ -486,6 +486,39 @@
       height: 120px;
     }
 
+    /* ── CVX/WTI ratio sub-chart ──────────────────────────────────── */
+    .ratio-section {
+      margin: 1rem 2rem 0;
+    }
+
+    .ratio-chart-wrapper {
+      position: relative;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    #ratioChart {
+      display: block;
+      width: 100%;
+      height: 160px;
+    }
+
+    .ratio-empty {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      background: rgba(13, 17, 23, 0.45);
+      z-index: 2;
+      padding: 1rem;
+    }
+
     /* ── Footer ───────────────────────────────────────────────────── */
     footer {
       margin: 1.5rem 2rem;
@@ -622,7 +655,7 @@
     /* ── Responsive ───────────────────────────────────────────────── */
     @media (max-width: 640px) {
       .navbar { padding: 0 1rem; }
-      .hero, .controls, .date-range-bar, .chart-wrapper, .volume-section, .stats-row, .fx-section, footer {
+      .hero, .controls, .date-range-bar, .chart-wrapper, .volume-section, .stats-row, .fx-section, .ratio-section, footer {
         margin-left: 1rem;
         margin-right: 1rem;
         padding-left: 0;
@@ -800,9 +833,21 @@
     </div>
   </div>
 
+  <!-- ── CVX / WTI ratio sub-chart ─────────────────────────────────── -->
+  <div class="ratio-section">
+    <div class="section-header">
+      <span class="section-title">CVX / WTI Ratio (USD)</span>
+      <div class="section-line"></div>
+    </div>
+    <div class="ratio-chart-wrapper">
+      <div class="ratio-empty" id="ratioEmpty">No CVX/WTI ratio data for selected date range.</div>
+      <canvas id="ratioChart"></canvas>
+    </div>
+  </div>
+
   <!-- ── Footer ─────────────────────────────────────────────────── -->
   <footer>
-    <span>Data: CVX daily OHLCV + AUD/USD FX via alphavantage.co, supplemented by <code>cvx_us_d.csv</code> and <code>DEXUSAL.csv</code> baselines, refreshed daily via GitHub Actions.</span>
+    <span>Data: CVX daily OHLCV + AUD/USD FX via alphavantage.co, WTI spot (<code>DCOILWTICO</code>) via FRED, supplemented by <code>cvx_us_d.csv</code>, <code>DEXUSAL.csv</code>, and <code>DCOILWTICO.csv</code> baselines; FX/WTI gaps are forward-filled by last known close and refreshed daily via GitHub Actions.</span>
     <span>Not financial advice. For informational purposes only.</span>
   </footer>
 
@@ -847,6 +892,7 @@
   let mainChart   = null;
   let volumeChart = null;
   let fxChart     = null;
+  let ratioChart  = null;
 
   // Active date window — driven by preset tabs, MAX, or custom date inputs
   let rangeStart = new Date(Date.now() - 180 * 86_400_000); // default: 6M ago
@@ -878,7 +924,7 @@
   //   updated: ISO string,
   //   latest_dividend: { amount, record_date, payment_date, declared_date?, type? } | null,
   //   dividends: [{ amount, record_date, payment_date, ... }],
-  //   data: [{ date, open, high, low, close, volume, fx, aud_close }]
+  //   data: [{ date, open, high, low, close, volume, fx, aud_close, wti?, cvx_wti_ratio? }]
   // }
 
   let cachedRows = null; // full dataset from data.json
@@ -940,6 +986,12 @@
         aud_close: Number.isFinite(Number(d.aud_close)) && Number(d.aud_close) > 0
           ? Number(d.aud_close)
           : (Number.isFinite(Number(d.aud)) && Number(d.aud) > 0 ? Number(d.aud) : null),
+        wti: Number.isFinite(Number(d.wti)) && Number(d.wti) > 0 ? Number(d.wti) : null,
+        cvx_wti_ratio: Number.isFinite(Number(d.cvx_wti_ratio)) && Number(d.cvx_wti_ratio) > 0
+          ? Number(d.cvx_wti_ratio)
+          : ((Number.isFinite(Number(d.close)) && Number(d.close) > 0 && Number.isFinite(Number(d.wti)) && Number(d.wti) > 0)
+            ? Number(d.close) / Number(d.wti)
+            : null),
       };
     }).filter(d => (
       Number.isFinite(d.open) &&
@@ -972,6 +1024,7 @@
       renderMainChart();
       renderVolumeChart();
       renderFxChart();
+      renderRatioChart();
       const updatedDate = updated ? fmtDate(new Date(updated)) : fmtDate(new Date());
       el('lastUpdated').textContent = `Updated ${updatedDate}`;
 
@@ -979,6 +1032,12 @@
       console.error(err);
       el('errorMsg').textContent = err.message || 'Unexpected error — please retry.';
       showError(true);
+      if (ratioChart) {
+        ratioChart.destroy();
+        ratioChart = null;
+      }
+      const ratioEmpty = el('ratioEmpty');
+      if (ratioEmpty) ratioEmpty.style.display = 'flex';
     } finally {
       showLoading(false);
     }
@@ -1123,6 +1182,69 @@
           y: {
             grid:   { color: GRID },
             ticks:  { color: '#a5d6a7', callback: v => v.toFixed(3) },
+            border: { color: '#30363d' },
+          },
+        },
+        animation: { duration: 350 },
+      },
+    });
+  }
+
+  // ── CVX/WTI ratio mini-chart ──────────────────────────────────────
+  function renderRatioChart() {
+    const canvas = el('ratioChart');
+    const empty = el('ratioEmpty');
+    if (!canvas || !empty) return;
+    const ratioData = allData.filter(d => Number.isFinite(d.cvx_wti_ratio) && d.cvx_wti_ratio > 0);
+    if (ratioChart) {
+      ratioChart.destroy();
+      ratioChart = null;
+    }
+    if (!ratioData.length) {
+      empty.style.display = 'flex';
+      return;
+    }
+    empty.style.display = 'none';
+
+    const ctx = canvas.getContext('2d');
+    ratioChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: ratioData.map(d => d.date),
+        datasets: [{
+          label: 'CVX / WTI',
+          data: ratioData.map(d => d.cvx_wti_ratio),
+          borderColor: '#e879f9',
+          backgroundColor: 'transparent',
+          borderWidth: 1.8,
+          pointRadius: 0,
+          tension: 0.3,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            enabled: true,
+            callbacks: {
+              label: ctx => `CVX/WTI: ${ctx.parsed.y.toFixed(3)}`
+            }
+          },
+        },
+        scales: {
+          x: {
+            type: 'time',
+            time: { unit: getTimeUnit() },
+            grid:   { color: GRID },
+            ticks:  { color: MUTED, maxTicksLimit: 8 },
+            border: { color: '#30363d' },
+          },
+          y: {
+            grid:   { color: GRID },
+            ticks:  { color: '#e879f9', callback: v => Number(v).toFixed(2) },
             border: { color: '#30363d' },
           },
         },
@@ -1362,6 +1484,12 @@
     if (allData.length === 0) {
       el('errorMsg').textContent = 'No data in selected date range.';
       showError(true);
+      if (ratioChart) {
+        ratioChart.destroy();
+        ratioChart = null;
+      }
+      const ratioEmpty = el('ratioEmpty');
+      if (ratioEmpty) ratioEmpty.style.display = 'flex';
       return;
     }
     renderHero();
@@ -1369,6 +1497,7 @@
     renderMainChart();
     renderVolumeChart();
     renderFxChart();
+    renderRatioChart();
   }
 
   // ── Controls ──────────────────────────────────────────────────────
