@@ -6,6 +6,10 @@ on:
     - cron: '17 7 * * *'  # daily at 07:17 UTC – backup run in case the primary was skipped/delayed
   workflow_dispatch:
 
+concurrency:
+  group: update-cvx-data-main
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -15,6 +19,11 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Sync checkout with latest main
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
 
       - name: Skip if data is already fresh (backup run guard)
         id: freshness_guard
@@ -983,8 +992,46 @@ jobs:
       - name: Commit updated data files
         if: steps.freshness_guard.outputs.skip != 'true'
         run: |
+          set -euo pipefail
+          FILES=(cvx_us_d.csv DEXUSAL.csv DCOILWTICO.csv data.json)
+
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add cvx_us_d.csv DEXUSAL.csv DCOILWTICO.csv data.json
-          git diff --staged --quiet || git commit -m "chore: update CVX data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push
+
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+          for file in "${FILES[@]}"; do
+            cp "$file" "$tmp_dir/$file"
+          done
+
+          max_attempts=3
+          for attempt in $(seq 1 "$max_attempts"); do
+            echo "Publish attempt ${attempt}/${max_attempts}"
+            git fetch origin main
+            git checkout -B main origin/main
+
+            for file in "${FILES[@]}"; do
+              cp "$tmp_dir/$file" "$file"
+            done
+
+            git add "${FILES[@]}"
+            if git diff --staged --quiet; then
+              echo "No data changes to commit after syncing with origin/main."
+              exit 0
+            fi
+
+            git commit -m "chore: update CVX data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+            if git push origin HEAD:main; then
+              echo "Push succeeded."
+              exit 0
+            fi
+
+            if [ "$attempt" -lt "$max_attempts" ]; then
+              echo "Push failed; retrying..."
+              sleep $((attempt * 2))
+            fi
+          done
+
+          echo "Failed to push updated data files after ${max_attempts} attempts."
+          exit 1
